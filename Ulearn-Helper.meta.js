@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.17.0
-// @description  Ulearn-Helper v4.17.0：GitHub 自动更新检查、版本提示与手动检查；AI 接口管理、刷课与答题工具。
+// @version      4.18.0
+// @description  Ulearn-Helper v4.18.0：课程进度工作台；考试填写失败时由 AI 有限操作题目控件；GitHub 自动更新与 AI 接口管理。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
