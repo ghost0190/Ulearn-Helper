@@ -1,15 +1,15 @@
 // ==UserScript==
-// @name         🥇优学院小助手（AI版）|视频-章节测试-作业考试查题(三合一)|本地题库+AI答题
+// @name         Ulearn-Helper
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.0
-// @description  Ulearn-Helper v4.18.0：课程进度工作台；考试填写失败时由 AI 有限操作题目控件；GitHub 自动更新与 AI 接口管理。
+// @version      4.18.1
+// @description  Ulearn-Helper v4.18.1：统一安装名称、菜单、日志与代码注释；学习进度工作台、AI 答题与 GitHub 自动更新。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js
-// @author       Miss. / AI-patch
+// @author       Miss. (original) / ghost0190 (maintenance)
 // @match        https://utest.ulearning.cn/*
 // @match        https://*.ulearning.cn/*/homework.do*
 // @match        https://homework.ulearning.cn/*
@@ -31,44 +31,38 @@
 // ==/UserScript==
 
 /*
- * ============================== 使用说明 ==============================
- * 原版依赖的答题服务器 tk.fm90.cn 已整台下线（80/443 全部无法连接）。
- * 在【设置】配置 AI 地址、模型和 Key；保存后无需每次输入密钥。
- * 本地缓存默认优先命中；其他来源按设置中的勾选与排序查询。
- * 自建服务器为可选项，地址可填 http://127.0.0.1:8787 或自己的域名。
- * 服务端 API Key 推荐通过环境变量配置，详见 README-security.md。
- * 配置服务器后按其上传审核规则处理试卷与答案，不直接覆盖可信题库。
- * =====================================================================
+ * Ulearn-Helper
+ * 在设置中配置 AI 接口、模型和密钥，保存后可重复使用。
+ * 本地缓存优先；其他答案来源按设置中的顺序查询。
+ * 自建题库服务器为可选来源，其配置见 ulearning-server/README-security.md。
  */
 
 (function () {
     "use strict";
-    //属性 注单用户限制搜索次数
-    //前端好兄弟 别对抗了好吗 我认输了 加我联系方式沟通一下吧
     const $w = unsafeWindow;
     // document-start 运行时页面 jQuery 尚未加载，$ 改为动态取用（页面 jQuery 就绪前回退到沙箱 jQuery）
     let $ = function (s, c) { return (unsafeWindow.jQuery || jquery)(s, c); };
     const jquery = jQuery.noConflict();
     const $version = GM_info.script.version.replaceAll('.','');
 
-    // ======= 尽早接管（document-start，先于页面一切脚本）=======
+    // 尽早接管（document-start，先于页面一切脚本）
     // 平台在页面加载早期就会做全屏/环境检测，必须让模拟代码先就位
-    try { KillAntiCheat(); } catch (e) { console.log("[Ulearning] KillAntiCheat 预加载异常:", e); }
-    try { LeaveShield(); } catch (e) { console.log("[Ulearning] LeaveShield 预加载异常:", e); }
+    try { KillAntiCheat(); } catch (e) { console.log("[Ulearn-Helper] KillAntiCheat 预加载异常:", e); }
+    try { LeaveShield(); } catch (e) { console.log("[Ulearn-Helper] LeaveShield 预加载异常:", e); }
     try { Re_Write(); } catch (e) { }
     try { AntiCheatProbe(); } catch (e) { }
     try { WarningEater(); } catch (e) { }
     try { NoReport(); } catch (e) { }
     try { FastStart(); } catch (e) { }
-    // ======= iframe 子页面只做环境伪造/拦截 =======
+    // iframe 子页面只做环境伪造/拦截
     // 考试界面通常嵌在 iframe 里，平台的检测在 iframe 内运行；
     // 若只在顶层伪造，iframe 里一查 fullscreenElement 就是"未全屏"→ 必然警告。
     // iframe 内：装好伪装后直接退出，不注入面板、不挂答题逻辑
-    console.log("[Ulearning] 脚本已加载 v" + GM_info.script.version + " ｜ " + location.href
+    console.log("[Ulearn-Helper] 脚本已加载 v" + GM_info.script.version + " ｜ " + location.href
         + (window.top === window.self ? "" : " ｜ (iframe，不显示悬浮窗)"));
     if (window.top !== window.self) return;
     try { FastStart(); } catch (e) { }
-    // 原作者的服务器配置，已下线失效，仅保留以免老函数报错
+    // 兼容字段：旧服务器接口已停用。
     const set = {
     get_answer: "https://tk.fm90.cn/fuck/cha.php",
     upload_data: "https://tk.fm90.cn/fuck/upload.php",
@@ -76,11 +70,10 @@
     Dealagging: false,
     left: 0,
     top: 0,
-    //下方双引号内填写对应token保存 例如：token: "XIqflbdhUSYskJaG" 已抛弃
     token: "",
     timestamp: -1,
     };
-    // ===== AI 接口（无后端模式的主力答案来源；OpenAI 兼容格式）=====
+    // AI 接口（无后端模式的主力答案来源；OpenAI 兼容格式）
     // 直接把 Key 填进面板[设置]即可，脚本用 GM_xmlhttpRequest 直连，不需要任何服务器。
     // 各家官方文档的 OpenAI 兼容端点（地址稳定；模型名会随服务商更新，故提供"拉取模型列表"实时获取）
     const AI_PRESETS = [
@@ -97,7 +90,7 @@
     ];
     const MODEL_CATALOG_DATE = "2026-10-12";
     Object.assign(AI_PRESETS.find(p => p.id === 'dashscope'), { home: 'https://www.aliyun.com/product/bailian', console: 'https://bailian.console.aliyun.com/', docs: 'https://help.aliyun.com/zh/model-studio/models' });
-    // ===== 控制台/网页地址 ≠ API 地址（"我填的没问题"里最常见的一种）=====
+    // 控制台/网页地址 ≠ API 地址（"我填的没问题"里最常见的一种）
     // 例：platform.deepseek.com 是登录建 Key 的网站，API 域名是 api.deepseek.com；
     // 打到网站上的 POST 会被它的 CDN/WAF 拦成 429 + "Request Blocked" 网页。
     // 只收录"该主机绝对不是 API 端点"的确定映射，映射目标用各家官方文档的接口地址。
@@ -136,7 +129,7 @@
             s = (isLocal ? "http://" : "https://") + s;
         }
         let fix = apiHostFix(s);
-        if (fix) { console.log("[Ulearning] 这是控制台/网页地址，已换成接口地址：" + fix); s = fix; }
+        if (fix) { console.log("[Ulearn-Helper] 这是控制台/网页地址，已换成接口地址：" + fix); s = fix; }
         s = s.replace(/\/+$/, "");
         if (/\/chat\/completions$/i.test(s)) return s;
         if (/^https?:\/\/api\.deepseek\.com$/i.test(s)) return s + "/chat/completions";
@@ -151,7 +144,7 @@
         api_key: "",
         model: "deepseek-flash",
         timeout: 30000,
-        // ===== 自定义请求（进阶：对接任意接口）=====
+        // 自定义请求（进阶：对接任意接口）
         auth: "bearer",            // bearer(Authorization: Bearer KEY) | header(自定义头) | query(URL参数) | none
         auth_name: "",             // auth=header/query 时的字段名，如 api-key / x-api-key / key
         headers: "",               // 额外请求头，JSON 字符串，如 {"X-Trace":"1"}
@@ -392,10 +385,7 @@
         let a = aiAuth(cfg, base + "/models");
         return { ok: true, url: a.url, headers: a.headers };
     };
-    // ===== 模型列表（参考 cc-switch 的思路）=====
-    // cc-switch：从供应商 baseUrl 推导 models 端点 → 拿不到就给"该端点不存在"的明确处理，
-    // 并回退到自带的 provider 预设模型列表。这里照做三件事：
-    //   ① 多路径探测  ② 结果缓存  ③ 全失败给预设候选
+    // 模型列表：探测候选地址、缓存结果，并在读取失败时使用预设候选。参考 cc-switch。
     const MODEL_PRESETS = {
         deepseek: ["deepseek-flash", "deepseek-v4-pro"],
         siliconflow: ["deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Pro", "Pro/zai-org/GLM-5.2"],
@@ -408,10 +398,7 @@
         ollama: ["qwen3:8b", "qwen3:14b", "gemma3:4b"],
         custom: []
     };
-    // ===== 兜底模型清单（搬自 cc-switch 的供应商预设）=====
-    // cc-switch 给 123 家供应商都维护了"人工核实过"的模型列表（见它的 presetModelMetadata.ts：
-    // "Reviewed model values used only to build Pi provider presets"）。这里按**接口地址**索引，
-    // 只在【实时拉取失败】时用来给候选：能拉取到就以拉取结果为准，不靠这个。
+    // 模型候选参考 cc-switch 的供应商预设；实时接口结果优先。
     const MODEL_PRESETS_BY_HOST = {
         "9527.codes": ["claude-opus-5","claude-sonnet-5","claude-haiku-4-5","claude-opus-5-5","claude-fable-5-1"],
         "9527.codes/v1": ["claude-opus-5","claude-sonnet-5","claude-haiku-4-5","claude-opus-5-5"],
@@ -692,7 +679,7 @@
         } catch (e) { }
         return Array.from(new Set(out.map(id => id.trim()).filter(Boolean))).sort();
     };
-    // ===== HTTP 错误可读化 =====
+    // HTTP 错误可读化
     // 服务商限流/风控时返回的往往是一整页 HTML，直接贴到界面上既看不懂又刷屏；
     // 这里统一转成一句中文（429/401/404…各有说法），界面上永远不出现原始 HTML。
     const isHtmlBody = function (t) {
@@ -765,14 +752,14 @@
             let h = cfg.headers;
             if (typeof h === "string") h = JSON.parse(h || "{}");
             if (h && typeof h === "object") for (let k in h) headers[k] = String(h[k]);
-        } catch (e) { console.log("[Ulearning] AI 额外请求头不是合法 JSON，已忽略"); }
+        } catch (e) { console.log("[Ulearn-Helper] AI 额外请求头不是合法 JSON，已忽略"); }
         let sys = String(cfg.system_prompt || "").trim() || AI_SYSTEM_PROMPT;
         let bodyText = "";
         let tmpl = String(cfg.template || "").trim();
         if (tmpl) {
             let esc = function (s) { return JSON.stringify(String(s == null ? "" : s)).slice(1, -1); };
             bodyText = tmpl.replace(/\{\{prompt\}\}/g, esc(prompt)).replace(/\{\{system\}\}/g, esc(sys)).replace(/\{\{model\}\}/g, esc(cfg.model || ""));
-            try { JSON.parse(bodyText); } catch (e) { console.log("[Ulearning] AI 自定义模板不是合法 JSON，将按原文发送"); }
+            try { JSON.parse(bodyText); } catch (e) { console.log("[Ulearn-Helper] AI 自定义模板不是合法 JSON，将按原文发送"); }
         } else {
             let body = {
                 model: cfg.model,
@@ -785,7 +772,7 @@
                 let ex = cfg.extra_body;
                 if (typeof ex === "string") ex = JSON.parse(ex || "{}");
                 if (ex && typeof ex === "object") for (let k in ex) body[k] = ex[k];
-            } catch (e) { console.log("[Ulearning] AI 额外请求体不是合法 JSON，已忽略"); }
+            } catch (e) { console.log("[Ulearn-Helper] AI 额外请求体不是合法 JSON，已忽略"); }
             // OpenAI 新模型使用 max_completion_tokens；默认请求省略不受支持的采样参数。
             if (/^https:\/\/api\.openai\.com\//i.test(url) && /^(?:gpt-[56]|o[134](?:-|$))/i.test(String(cfg.model || ''))) {
                 if (!Object.prototype.hasOwnProperty.call(body, 'max_completion_tokens')) body.max_completion_tokens = body.max_tokens;
@@ -804,7 +791,7 @@
         }
         return { ok: !!url && (auth === "none" || !!key), url: url, headers: headers, body: bodyText };
     };
-    // ===== 答案"体检"：服务商的风控/报错页绝不能被当成答案填进卷子 =====
+    // 答案"体检"：服务商的风控/报错页绝不能被当成答案填进卷子
     // 真实踩过的坑：DeepSeek 边缘 WAF 返回 "Request Blocked" 整页 HTML（带 Event ID），
     // 旧代码 JSON.parse 失败后把原文当答案返回 → 直接填进卷子并存进本地题库。
     const ERROR_PAGE_RE = /request\s+blocked|too\s+many\s+requests|access\s+denied|just\s+a\s+moment|attention\s+required|cf-error|cloudflare|bad\s+gateway|service\s+unavailable|event\s+id\s*:|waf|风控|访问被拒绝|请求被拦截|服务不可用|非法请求|请求异常/i;
@@ -826,7 +813,7 @@
         if (s0.length > MAX_ANSWER_LEN && /[<>{}]|https?:\/\//i.test(s0)) return true;
         return false;
     };
-    // ===== AI 请求节流与冷却 =====
+    // AI 请求节流与冷却
     // 整卷几十道题连着打同一个接口，很容易被服务商 WAF 判成机器人（就是上面那张拦截页）；
     // 同时限制在途数量和请求启动间隔；被限流后该接口冷却一段时间。
     const AI_MIN_GAP = 1000;      // 两次请求最小间隔(ms)
@@ -868,7 +855,7 @@
     const parseAIResponse = function (cfg, text) {
         let s = String(text == null ? "" : text).trim();
         if (!s) return "";
-        if (looksLikeErrorPage(s)) { console.warn("[Ulearning] AI 返回的是风控/报错页，已丢弃"); return ""; }
+        if (looksLikeErrorPage(s)) { console.warn("[Ulearn-Helper] AI 返回的是风控/报错页，已丢弃"); return ""; }
         let data = null;
         try { data = JSON.parse(s); } catch (e) { return isJunkAnswer(s) ? "" : s; }
         let pickPath = function (obj, p) {
@@ -894,11 +881,11 @@
         if (!c && data.response) c = data.response;      // 部分国产接口
         if (!c && data.result) c = data.result;
         let out = c ? String(c).trim() : "";
-        if (isJunkAnswer(out)) { console.warn("[Ulearning] AI 返回内容疑似报错页，已丢弃"); return ""; }
+        if (isJunkAnswer(out)) { console.warn("[Ulearn-Helper] AI 返回内容疑似报错页，已丢弃"); return ""; }
         return out;
     };
 
-    // ===== 来源编排：一个可勾选 + 可拖动排序的列表 =====
+    // 来源编排：一个可勾选 + 可拖动排序的列表
     // 列表从上到下就是尝试顺序（上面的先试），没答案自动轮到下一个。
     // 来源类型：local(本地题库) / remote(远程静态题库) / server(自建服务器) / ai:<id>(某个AI接口，可加多个)
     const AI_DEFAULTS = Object.assign({}, AI_CONFIG_DEFAULT);
@@ -908,7 +895,7 @@
         server: { name: "自建/云端服务器", desc: "可选：集中题库 + 服务器端AI（需填地址）" },
     };
     const UL_CONFIG_KEY = "ul_config_v3";
-    // ---- 纯函数：旧键 → v3 文档（离线可测） ----
+    // 纯函数：旧键 → v3 文档（离线可测）
     const migrateConfig = function (legacy, aiDefaults) {
         legacy = legacy || {};
         let doc = {
@@ -932,7 +919,7 @@
         if (Array.isArray(sc.ais) && sc.ais.length) doc.ais = sc.ais;
         if (Array.isArray(sc.order) && sc.order.length) doc.sources.order = sc.order;
         else if (sc.mode) {
-            // v2.5.0 的"模式"= 把对应来源关掉，而不是从列表里删掉（保留顺序便于以后一键打开）
+            // 旧配置模式迁移为来源启用状态，并保留来源顺序。
             let bankFirst = (Number(sc.bank && sc.bank.priority) || 1) <= (Number(sc.ai && sc.ai.priority) || 2);
             let bankList = ["local", "remote", "server"], aiList = ["ai:default"];
             let bankOn = !!(sc.bank ? sc.bank.enabled : true);
@@ -954,7 +941,7 @@
         if (legacy.panel_pos && typeof legacy.panel_pos.left == "number") doc.ui.panelPos = { left: legacy.panel_pos.left, top: legacy.panel_pos.top };   // 面板位置 ≠ 弹窗位置
         return doc;
     };
-    // ---- 纯函数：归一化（补默认、修顺序、去重、修坏值） ----
+    // 纯函数：归一化（补默认、修顺序、去重、修坏值）
     const normalizeConfig = function (doc, aiDefaults, meta) {
         let d = Object.assign({}, doc || {});
         d.v = 3;
@@ -990,8 +977,7 @@
         ids.forEach(function (id) { if (order.indexOf(id) == -1) order.push(id); });
         d.sources.order = order.filter(function (id) { return id.indexOf("ai:") === 0 ? ids.indexOf(id) != -1 : !!meta[id]; });
         if (!d.sources.order.length) d.sources.order = ids.concat(["local", "remote", "server"]);
-        // v3.1 起默认顺序改为"AI 优先"：仅当顺序还是旧默认（用户没手动拖过）时一次性升级，
-        // 用户自定义过的顺序绝不动。靠 ui.orderDefaultFix 标记保证只做一次。
+        // 仅迁移未自定义的旧默认来源顺序，通过 ui.orderDefaultFix 防止重复迁移。
         if (!d.ui.orderDefaultFix) {
             d.ui.orderDefaultFix = 1;
             if (d.sources.order.join(",") === "local,remote,server,ai:default") {
@@ -1003,7 +989,7 @@
         d.sources.enabled = en;
         return d;
     };
-    // ---- 状态层：唯一写入口 ----
+    // 状态层：唯一写入口
     const ConfigStore = {
         _doc: null,
         _subs: [],
@@ -1308,7 +1294,7 @@
         }
     };
 
-    // ===== GitHub release checks: metadata only, never sends account/configuration data =====
+    // GitHub release checks: metadata only, never sends account/configuration data
     const ScriptUpdates = {
         metaURL: 'https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js',
         scriptURL: 'https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js',
@@ -1657,7 +1643,7 @@
         build: buildAIRequest,
         parse: parseAIResponse
     };
-    // ===== 云端服务器默认地址（可移植性开关）=====
+    // 云端服务器默认地址（可移植性开关）
     // 把自建后端部署到云端（见 ulearning-server/deploy/README-deploy.md）后，把地址填在这里，
     // 脚本装到任何电脑、任何浏览器都开箱即用，不用再点[设置]。
     //   例：const DEFAULT_SERVER = "https://bank.example.com";     // 或 "https://xxx.fly.dev"
@@ -1675,7 +1661,7 @@
         }
         return s.replace(/\/+$/, "");
     };
-    // ===== 远程静态题库（真正的"零服务器"共享方案）=====
+    // 远程静态题库（真正的"零服务器"共享方案）
     // 把导出的 bank-export.json（或任意 {answers:[{title,answer,options}]} / {map:{...}} / 数组）
     // 放到 GitHub Gist、jsDelivr、对象存储、任意静态 CDN，把直链填进面板[设置]即可。
     // 脚本用 GM_xmlhttpRequest 直接拉取并合并进本地题库 —— 不需要任何后端进程。
@@ -1746,7 +1732,7 @@
                     timer = setTimeout(function () {
                         if (settled) return;
                         settled = true;
-                        console.log("[Ulearning] 远程题库同步超时，先跳过");
+                        console.log("[Ulearn-Helper] 远程题库同步超时，先跳过");
                         resolve({ ok: okAny, items: items, loaded: loaded, urls: urls.length, timeout: true });
                     }, 25000);
                 } catch (e) { }
@@ -1778,14 +1764,14 @@
                                 let list = RemoteBank.parse(data);
                                 let n = RemoteBank.merge(list, "远程题库");
                                 items += list.length; loaded += n; okAny = true;
-                                console.log("[Ulearning] 远程题库同步:", u, "→ 解析", list.length, "条 / 载入", n, "条");
+                                console.log("[Ulearn-Helper] 远程题库同步:", u, "→ 解析", list.length, "条 / 载入", n, "条");
                             } catch (e) {
-                                console.log("[Ulearning] 远程题库解析失败:", u, String(e && e.message || e));
+                                console.log("[Ulearn-Helper] 远程题库解析失败:", u, String(e && e.message || e));
                             }
                             finish();
                         },
-                        onerror: function () { console.log("[Ulearning] 远程题库拉取失败(网络/跨域):", u); finish(); },
-                        ontimeout: function () { console.log("[Ulearning] 远程题库拉取超时:", u); finish(); }
+                        onerror: function () { console.log("[Ulearn-Helper] 远程题库拉取失败(网络/跨域):", u); finish(); },
+                        ontimeout: function () { console.log("[Ulearn-Helper] 远程题库拉取超时:", u); finish(); }
                     });
                 });
             }).finally(function () { RemoteBank._syncWork = null; });
@@ -1841,7 +1827,7 @@
         return randomStr;
     }
 
-    // ===================== 本地题库 =====================
+    // 本地题库
     const Bank = {
         MAX: 3000,
         _load() {
@@ -1921,7 +1907,7 @@
             if (!title) return;
             answer = (answer == null ? "" : String(answer)).trim();
             if (!answer || answer.length > 3000) return;
-            if (isJunkAnswer(answer)) { console.warn("[Ulearning] 疑似报错页/HTML，不入库"); return; }
+            if (isJunkAnswer(answer)) { console.warn("[Ulearn-Helper] 疑似报错页/HTML，不入库"); return; }
             title = re_text(String(title));
             if (title.length > 2000) return;
             if (!title || title === answer) return;
@@ -2036,7 +2022,7 @@
         },
         set(newFunc) {
             // 静默忽略：以前这里 throw，会让页面其它脚本在自己的赋值语句上抛异常
-            console.log("[Ulearning] 已忽略对 document.querySelectorAll 的改写");
+            console.log("[Ulearn-Helper] 已忽略对 document.querySelectorAll 的改写");
         }
     })
     //处理类
@@ -2052,7 +2038,7 @@
 
     }
 
-    // ===== 每道题的"补充信息" =====
+    // 每道题的"补充信息"
     // 材料题缺的材料、老师给的提示、"这题要译成英文"这类补充，按题目 key 记住：
     // 以后同一道题再查会自动带上，不用每次重新贴。
     const QExtra = {
@@ -2103,7 +2089,7 @@
                 clearTimeout(timer);
                 if (signal) signal.removeEventListener('abort', abort);
                 const callback = options[event] || (event !== 'onload' ? options.onerror : null);
-                try { if (callback) callback(value || {}); } catch (e) { console.log('[Ulearning] 请求回调异常:', String(e && e.message || e)); }
+                try { if (callback) callback(value || {}); } catch (e) { console.log('[Ulearn-Helper] 请求回调异常:', String(e && e.message || e)); }
             };
             const abort = function () {
                 finish('onabort');
@@ -2380,7 +2366,7 @@
             });
         },
 
-        // ===================== AI 答题 =====================
+        // AI 答题
         // 最近一次 AI 失败原因（给状态栏/日志用）
         _lastAIError: "",
         ask_ai: function (prompt, aiCfg, opts) {
@@ -2391,7 +2377,7 @@
             let cool = _aiCool[aid] || 0;
             if (cool > Date.now()) {
                 Util._lastAIError = "被服务商限流，冷却中（还剩 " + Math.ceil((cool - Date.now()) / 1000) + " 秒）";
-                console.warn("[Ulearning] " + Util._lastAIError + "，本轮跳过");
+                console.warn("[Ulearn-Helper] " + Util._lastAIError + "，本轮跳过");
                 return Promise.resolve("");
             }
             // 本次查询代号：排队期间用户又点了一次查询 → 这批请求直接作废（否则 50 题排队 + 再点一次 = 100 个请求）
@@ -2418,7 +2404,7 @@
                                 let st = Number(r.status) || 0;
                                 if (st < 200 || st >= 300) {
                                     Util._lastAIError = friendlyHttpError(st, raw, r.responseHeaders);
-                                    console.warn("[Ulearning] AI 返回 " + Util._lastAIError);
+                                    console.warn("[Ulearn-Helper] AI 返回 " + Util._lastAIError);
                                     if (st === 429 || st === 403 || looksLikeErrorPage(raw)) {
                                         _aiCool[aid] = Date.now() + AI_COOLDOWN;
                                         Util._lastAIError += "（已暂停该接口 " + Math.round(AI_COOLDOWN / 1000) + " 秒）";
@@ -2428,19 +2414,19 @@
                                 if (looksLikeErrorPage(raw)) {
                                     _aiCool[aid] = Date.now() + AI_COOLDOWN;
                                     Util._lastAIError = "被服务商风控拦截（返回报错页，已暂停该接口 " + Math.round(AI_COOLDOWN / 1000) + " 秒）";
-                                    console.warn("[Ulearning] " + Util._lastAIError);
+                                    console.warn("[Ulearn-Helper] " + Util._lastAIError);
                                     return resolve("");
                                 }
                                 resolve(parseAIResponse(cfg, raw));
                             } catch (e) { resolve(""); }
                         },
-                        onerror: function () { Util._lastAIError = "网络错误（地址/Key/跨域/额度）"; console.log("[Ulearning] AI 请求失败（地址/Key/跨域/额度）"); resolve(""); },
-                        ontimeout: function () { Util._lastAIError = "请求超时"; console.log("[Ulearning] AI 请求超时"); resolve(""); }
+                        onerror: function () { Util._lastAIError = "网络错误（地址/Key/跨域/额度）"; console.log("[Ulearn-Helper] AI 请求失败（地址/Key/跨域/额度）"); resolve(""); },
+                        ontimeout: function () { Util._lastAIError = "请求超时"; console.log("[Ulearn-Helper] AI 请求超时"); resolve(""); }
                     });
                 });
             });
         },
-        // ===== 整卷批量提问：一次请求答完整卷 =====
+        // 整卷批量提问：一次请求答完整卷
         // 逐题问 50 道题 = 50 个请求（慢、且容易被服务商当成爬虫限流）；
         // 这里先把整卷打包成 1 个请求，答案直接写进本地题库，后面的逐题流程会瞬间命中。
         // 题干的读法与 way1/way3 保持一致，保证题库 key 能对上。
@@ -2600,12 +2586,12 @@
                     for (let c = 0; c < again.length; c++) { if (!valid()) return saved; extra += await Util._askBatch(ai, again[c], valid); }
                     saved += extra;
                 }
-                if (saved) console.log("[Ulearning] 批量提问：拿到 " + saved + " 道题的答案（待答 " + todo.length
+                if (saved) console.log("[Ulearn-Helper] 批量提问：拿到 " + saved + " 道题的答案（待答 " + todo.length
                     + " 题，第一轮 " + chunks.length + " 批" + (miss.length ? "，补漏 " + miss.length + " 题再得 " + extra : "") + "）");
                 return saved;
             })();
         },
-        // ===== 诊断：把"为什么被拦"变成证据（只在你点按钮时跑，不会自己发请求）=====
+        // 诊断：把"为什么被拦"变成证据（只在你点按钮时跑，不会自己发请求）
         // ① GET {base}/models ② POST 一次最小对话 ③ 出口 IP（判断 VPN / 机房 / 校园网共享出口）
         aiDiag: function (aiCfg) {
             let cfg = aiCfg || AIConfig.get();
@@ -2745,11 +2731,11 @@
         _build_prompt: function (question, options, kind, typeName, extra, context, info) {
             return AnswerProtocol.prompt(Object.assign({}, info || {}, { title: question, options: options || [], kind, typeName, extra, material: context }));
         },
-        // ===== 答案解析 =====
+        // 答案解析
         // 模型的真实输出五花八门：先写一段推理再给答案、用 Markdown 加粗、包在代码块里、
         // 全角字符、答案是选项文字而不是字母……统一按四步收口：
         //   ① _cleanAnswer 去包装 ② _answerPart 只取「答案：」那一段
-        //   ③ 按题型解析        ④ 解析不出来就拿选项文字反查（旧版这里直接判"无答案"）
+        //   ③ 按题型解析        ④ 必要时按选项文字匹配
         _cleanAnswer: function (raw) {
             let s0 = String(raw == null ? "" : raw);
             let fence = s0.match(/```[a-zA-Z]*\s*([\s\S]*?)```/);
@@ -2797,8 +2783,7 @@
             if (m && m.index > 0) t = t.slice(0, m.index);
             return t.trim();
         },
-        // 判断题：取"最先出现"的判定词。
-        // 旧版用 test() 逐个找：回答「不正确」时"正确"命中 → 判成 true，方向正好反了。
+        // 判断题解析：使用完整答案匹配，避免否定词被识别为肯定答案。
         _judgeOf: function (s) {
             let raw = String(s == null ? "" : s).trim();
             let t = raw.toLowerCase().replace(/[\s。．，,、!！?？"“”'‘’]/g, "");
@@ -2873,7 +2858,7 @@
             if (info) return Util.parse_ai(answer, options, kind, info.typeName, info);
             return AnswerProtocol.adapt(answer, options || [], kind || "generic");
         },
-        // 是否是"1||2||3"这类序号型答案（旧版本遗留的坏数据，不可直接用于填写）
+        // 识别仅包含序号的答案，防止未经选项映射就直接填写。
         _looks_like_indexes: function (answer) {
             let s = String(answer == null ? "" : answer).trim();
             return /^[0-9]+([\s|｜,，、;；]*[0-9]+)*$/.test(s);
@@ -3042,10 +3027,9 @@
                     try { a.parentNode && a.parentNode.removeChild(a); URL.revokeObjectURL(url); } catch (e) { }
                 }, 1500);
                 return true;
-            } catch (e) { console.log("[Ulearning] 导出失败:", String(e && e.message || e)); return false; }
+            } catch (e) { console.log("[Ulearn-Helper] 导出失败:", String(e && e.message || e)); return false; }
         },
-        // 复制到剪贴板：GM_setClipboard → navigator.clipboard → execCommand 三级兜底，并给出可见反馈
-        // （旧版只调 GM_setClipboard 且没有任何提示，失败时用户看到的就是"点了没反应"）
+        // 复制使用 GM_setClipboard、Clipboard API 和 execCommand 逐级回退。
         copy: function (text, el) {
             let s = String(text == null ? "" : text);
             if (!s) return false;
@@ -3074,7 +3058,7 @@
                     }
                 } catch (e) { err = String(e && e.message || e); }
             }
-            if (!ok && err) console.log("[Ulearning] 复制失败:", err);
+            if (!ok && err) console.log("[Ulearn-Helper] 复制失败:", err);
             Util._copyFlash(el, ok);
             return ok;
         },
@@ -3144,20 +3128,19 @@
                 // 材料题：题块里的材料/案例一起发给 AI（题干往往只是问题本身）
                 let context = "";
                 try { context = qinfo ? qinfo.material : Util._materialOf($ans); } catch (e) { }
-                // 多选判定：页面题型名 + DOM 里的勾选框。勾选框就是多选，比文字可靠 ——
-                // 判错成单选会把多选答案截成一个选项（用户看到的"答案错误"）
+                // 根据题型和结构确认多选，避免截断答案。
                 let isMulti = /多选/.test(String(typeName || ""));
                 try {
                     if (!isMulti && $ans && $ans.find('input[type="checkbox"], .ul-checkbox__input, .el-checkbox__input').length) isMulti = true;
                 } catch (e) { }
                 let typeForParse = isMulti ? "多选题" : typeName;
                 let aiInfo = Object.assign({}, qinfo || {}, { title: question, typeName: typeForParse, kind, multiple: isMulti, options, extra, material: context });
-                if (extra) console.log("[Ulearning] 本题带补充信息(" + extra.length + " 字)，已附加到提示词");
+                if (extra) console.log("[Ulearn-Helper] 本题带补充信息(" + extra.length + " 字)，已附加到提示词");
                 let done = async function (answer, from) {
                     if (!valid()) return 0;
                     // 最后一道闸：任何来源（题库/服务器/AI）返回的"报错页/HTML"都不许填进卷子
                     if (answer && isJunkAnswer(answer)) {
-                        console.warn("[Ulearning] 丢弃疑似报错页/HTML 的答案（来源：" + from + "）：", String(answer).slice(0, 120));
+                        console.warn("[Ulearn-Helper] 丢弃疑似报错页/HTML 的答案（来源：" + from + "）：", String(answer).slice(0, 120));
                         answer = "";
                         from = from + "（返回报错页）";
                     }
@@ -3172,7 +3155,7 @@
                     if (options && options.length && kind == "choice") {
                         let aligned = Util._align_answer(String(answer), options);
                         if (aligned) answer = aligned;
-                        else console.log("[Ulearning] 答案与当前选项未匹配:", answer, options);
+                        else console.log("[Ulearn-Helper] 答案与当前选项未匹配:", answer, options);
                     }
                     if (td && !td.parentNode) td = null;   // 行已被清空/脱离文档：跳过面板写入（自动填卷照旧）
                     if (td) {
@@ -3203,7 +3186,7 @@
                             if ($ans && kinds == "exam") n = await Object.assign({}, respondentExam, { _valid: valid })._answer(ansTxt, $ans) || 0;
                             if ($ans && kinds == "homework") n = await Object.assign({}, respondentHomeWork, { _valid: valid })._answer(ansTxt, $ans) || 0;
                             if ($ans && kinds == "practice") n = await respondent.fillFrom(ansTxt, kind, options, $ans, valid) || 0;
-                        } catch (e) { console.log("[Ulearning] 自动填卷异常:", e); }
+                        } catch (e) { console.log("[Ulearn-Helper] 自动填卷异常:", e); }
                         return n;
                     };
                     // 备选答案：把"选项原文"换成字母。页面上的选项文字和题库里存的略有出入时，
@@ -3230,7 +3213,7 @@
                         if (!got && altAnswer) got = await fillOnce(altAnswer);
                         if (got) {
                             if (warnEl && warnEl.parentNode) { try { warnEl.parentNode.removeChild(warnEl); } catch (e) { } }
-                            console.log("[Ulearning] 自动填卷成功，填了 " + got + " 处");
+                            console.log("[Ulearn-Helper] 自动填卷成功，填了 " + got + " 处");
                             return valid() ? got : 0;
                         }
                         if (left > 0) { await new Promise(r => setTimeout(r, 700)); return attempt(left - 1); }
@@ -3241,7 +3224,7 @@
                             if(warnEl && warnEl.parentNode)warnEl.parentNode.removeChild(warnEl);
                         }
                         if (!valid() || !td || !$ans) return 0;
-                        console.log("[Ulearning] 自动填卷失败（已重试）:", String(answer).slice(0, 40));
+                        console.log("[Ulearn-Helper] 自动填卷失败（已重试）:", String(answer).slice(0, 40));
                         warnEl = document.createElement("div");
                         warnEl.style.cssText = "color:#c0392b;font-size:11px";
                         warnEl.innerText = (kind == "essay" || kind == "translate")
@@ -3255,14 +3238,14 @@
                 let cached = "";
                 let lastFrom = "";
                 let lockTxt = function (t) { if (!valid()) return; try { td.innerText = t; } catch (e) { } };
-                // ===== 按[设置]里勾选并排序好的来源列表依次尝试 =====
+                // 按[设置]里勾选并排序好的来源列表依次尝试
                 let plan = SourceConfig.plan();
                 if (!plan.length) {
                     if (td) lockTxt("没有勾选任何来源，去[设置]选一个");
                     Bank.markPending(question, quetype, options.join("||"));
                     return 0;
                 }
-                console.log("[Ulearning] 本次来源顺序:", plan.map(function (x) { return SourceConfig.name(x); }).join(" → "));
+                console.log("[Ulearn-Helper] 本次来源顺序:", plan.map(function (x) { return SourceConfig.name(x); }).join(" → "));
                 // 本地已经答过的题直接命中（秒回、不打网络）。
                 // 批量提问刚写进题库的答案也走这条路 —— 否则"AI 优先"的排序会让每道题再问一次 AI，
                 // 既慢又白白撞服务商的限流。
@@ -3280,9 +3263,9 @@
                 for (let pi = 0; pi < plan.length; pi++) {
                     if (!valid()) return 0;
                     let id = plan[pi];
-                    // ---------- 本地题库 ----------
+                    // 本地题库
                     if (id == "local") {
-                        if (force) { console.log("[Ulearning] 单题重试：跳过本地题库缓存"); continue; }
+                        if (force) { console.log("[Ulearn-Helper] 单题重试：跳过本地题库缓存"); continue; }
                         try {
                             let hit = Bank.find(question, options, aiInfo);
                             if (hit) {
@@ -3291,12 +3274,12 @@
                                     return done(adapted, "本地题库");
                                 }
                                 cached = adapted;
-                                console.log("[Ulearning] 本地题库疑似序号答案，先继续问其他来源:", adapted);
+                                console.log("[Ulearn-Helper] 本地题库疑似序号答案，先继续问其他来源:", adapted);
                             }
                         } catch (e) { }
                         continue;
                     }
-                    // ---------- 远程静态题库 ----------
+                    // 远程静态题库
                     if (id == "remote") {
                         if (force) continue;
                         try {
@@ -3313,10 +3296,10 @@
                                 let hit2 = Bank.find(question, options, aiInfo);
                                 if (hit2 && Util._adapt_answer(hit2, options, kind, aiInfo)) return done(Util._adapt_answer(hit2, options, kind, aiInfo), "远程题库");
                             }
-                        } catch (e) { console.log("[Ulearning] 远程题库同步异常:", String(e && e.message || e)); }
+                        } catch (e) { console.log("[Ulearn-Helper] 远程题库同步异常:", String(e && e.message || e)); }
                         continue;
                     }
-                    // ---------- 自建/云端服务器 ----------
+                    // 自建/云端服务器
                     if (id == "server") {
                         if (!ServerConfig.ready()) { lastFrom = "服务器未配置"; continue; }
                         lockTxt("查询服务器中..");
@@ -3332,7 +3315,7 @@
                         lastFrom = "服务器没有这道题";
                         continue;
                     }
-                    // ---------- AI 接口(可多个，各自配置) ----------
+                    // AI 接口(可多个，各自配置)
                     if (id.indexOf("ai:") === 0) {
                         let ai = SourceConfig.aiOf(id);
                         if (!ai || !SourceConfig.aiReady(ai)) {
@@ -3354,7 +3337,7 @@
                         continue;
                     }
                 }
-                // ===== 所有来源都没答案 =====
+                // 所有来源都没答案
                 if (!valid()) return 0;
                 SourceConfig.maybeRotate();     // 勾了"轮询"就把顺序整体前移一位（分摊到下一个来源）
                 if (cached) return done(cached, "本地题库(存疑)");
@@ -3379,9 +3362,7 @@
             if (existing && panel.contains(existing)) return true;
             let savedRate = '6.00';
             try { savedRate = this.$rateText.find('input').val() || savedRate; } catch (e) {}
-            // 控制条放进面板里。
-            // 原来是把 <td>/<tr> append 到 body 上：<tr> 会跟着文档流跑到页面最底下，
-            // 用户根本看不到"开始视频"按钮 → 永远不会开始刷课，也就没有"刷课中"。
+            // 学习控制条挂载到悬浮窗，避免非法表格结构影响布局。
             this.$startBtn = jquery('<button class="ul-btn ul-btn-primary" id="ul_study_start">开始刷课</button>');
             this.$stopBtn = jquery('<button class="ul-btn" id="ul_study_stop">暂停刷课</button>');
             this.$rateText = jquery('<span class="ul-study-rate">倍速 <input id="rate" type="text" value="6.00">x</span>');
@@ -3396,7 +3377,7 @@
                 let $tools = jquery('.ul-panel .ul-tools');
                 if ($tools.length) $tools.after($row);
                 else jquery('.ul-panel').append($row);
-            } catch (e) { console.log("[Ulearning] 刷课控制条挂载失败:", e); }
+            } catch (e) { console.log("[Ulearn-Helper] 刷课控制条挂载失败:", e); }
             this._inited = !!document.getElementById('ul_study_row');
             if (this.timer) this.$startBtn.hide(); else this.$stopBtn.hide();
             this.bindEvent();
@@ -3426,8 +3407,8 @@
                 this.$startBtn.hide();
                 this.$stopBtn.show();
                 _ulStudyState("刷课中..");
-                console.log("[Ulearning] 刷课已开始" + (auto ? "（打开课件页自动开始，可在【来源】页关掉）" : ""));
-            } catch (e) { console.log("[Ulearning] 开始刷课异常:", e); }
+                console.log("[Ulearn-Helper] 刷课已开始" + (auto ? "（打开课件页自动开始，可在【来源】页关掉）" : ""));
+            } catch (e) { console.log("[Ulearn-Helper] 开始刷课异常:", e); }
         },
         // 暂停刷课
         stop() {
@@ -3465,7 +3446,7 @@
 
         // 视频主逻辑
         logic() {
-            try {   // 任何一步异常都不该让整轮刷课中断（原来一个异常就整轮中断，表现是"卡住不动"）
+            try {   // 捕获单轮异常，保留后续运行机会。
             if (this._courseFinished) return;
             if (_ulNavigatePending(false)) return;
             // 如果页面中弹出了框框
@@ -3503,7 +3484,7 @@
                     if (_ulModalStuck === 1) _ulStudyState("有个弹窗挡着，正在尝试关闭..");
                     return;
                 }
-                if (_ulModalStuck === 6) console.log("[Ulearning] 弹窗一直关不掉，忽略它继续刷课（视频/翻页照常）");
+                if (_ulModalStuck === 6) console.log("[Ulearn-Helper] 弹窗一直关不掉，忽略它继续刷课（视频/翻页照常）");
             } else {
                 _ulModalStuck = 0;
             }
@@ -3529,7 +3510,7 @@
                     return;
                 }
 
-                let parentId = _ulPageId();           // 原来这里 .attr('id').substring(4) 会抛异常
+                let parentId = _ulPageId();           // 使用安全的页面 ID 读取函数。
                 let $questions = _ulPracticeQuestions();
                 if (!$questions.length) {
                     _ulStudyState('未识别到练习题块，请手动检查');
@@ -3546,27 +3527,19 @@
                 return;
             }
 
-            // 没有弹窗/题目/视频 → 翻下一页。
-            // 节流 3 秒：原来每 1.5 秒点一次，页面还没渲染完就被翻过去了（漏刷）
+            // 翻页节流，等待上一页操作和页面渲染完成。
             let _now = Date.now();
             if (_now - _ulLastPageTurn > 3000) {
                 _ulLastPageTurn = _now;
                 _ulStudyState("刷课中：本页没有视频/题目，翻下一页");
-                console.log("[Ulearning] 本页没有视频/题目，翻下一页");
+                console.log("[Ulearn-Helper] 本页没有视频/题目，翻下一页");
                 _ulNextPage("本页没有视频/题目", true);
             }
-            } catch (e) { console.log("[Ulearning] 刷课主循环异常（本次已忽略）:", e); }
+            } catch (e) { console.log("[Ulearn-Helper] 刷课主循环异常（本次已忽略）:", e); }
         },
     }
 
-    // 答题器
-    // ===== 刷课：视频那一段的加固版 =====
-    // 原版把 DOM 取值串成一行，任何一处取不到就抛异常 → 整段刷课逻辑当场中断（表现就是"卡住不动"）；
-    // 倍速写死 i*4 下标、"看完没看完"只认一个 data-bind 属性、必须存在 #rate 输入框。
-    // ===== 暂停后恢复播放 =====
-    // 原来只调用一次原生 el.play()：被浏览器自动播放策略拒掉（未静音 + 无用户手势）、
-    // 或者播放器自己没接住，就永远停在暂停状态（"有时候暂停不能继续播放"）。
-    // 这里逐层兜底，并且把失败原因亮出来。
+    // 恢复播放：依次尝试原生播放、静音重试和播放器按钮。
     let _ulLastResumeAt = 0;
     let _ulPlayErr = "";
     function _ulResumeVideo($v, i) {
@@ -3588,10 +3561,10 @@
                                 el.muted = true;
                                 let p2 = el.play();
                                 if (p2 && p2.catch) p2.catch(function () { });
-                                console.log("[Ulearning] 浏览器拦了自动播放，已自动静音后重试");
+                                console.log("[Ulearn-Helper] 浏览器拦了自动播放，已自动静音后重试");
                             } catch (e) { }
                         } else {
-                            console.log("[Ulearning] 恢复播放被拒：" + _ulPlayErr);
+                            console.log("[Ulearn-Helper] 恢复播放被拒：" + _ulPlayErr);
                         }
                     });
                 }
@@ -3606,7 +3579,7 @@
                 let $ov = jquery('.mejs__overlay-play .mejs__overlay-button, .mejs__overlay-button');
                 if ($ov.length) {
                     $ov.eq(Math.min(i, $ov.length - 1)).click();
-                    console.log("[Ulearning] 已点播放器中央播放键恢复播放");
+                    console.log("[Ulearn-Helper] 已点播放器中央播放键恢复播放");
                     ok = true;
                 }
             } catch (e) { }
@@ -3619,7 +3592,7 @@
                     let t = String($btn.attr('title') || "");
                     if (!t || /播放|play/i.test(t)) {
                         $btn.click();
-                        console.log("[Ulearning] 已点播放键恢复播放（title=" + t + "）");
+                        console.log("[Ulearn-Helper] 已点播放键恢复播放（title=" + t + "）");
                         ok = true;
                     }
                 }
@@ -3747,7 +3720,7 @@
                     _ulLastPageTurn = now;
                     _ulLastPageTurnPage = page;
                     jquery(button).click();
-                    console.log("[Ulearning] 翻到下一节（" + (why || "") + " · " + sels[i] + "）");
+                    console.log("[Ulearn-Helper] 翻到下一节（" + (why || "") + " · " + sels[i] + "）");
                     return true;
                 }
             } catch (e) { }
@@ -3767,11 +3740,11 @@
                 _ulLastPageTurn = now;
                 _ulLastPageTurnPage = page;
                 jquery(hit).click();
-                console.log("[Ulearning] 翻到下一节（" + (why || "") + " · 按按钮文字）");
+                console.log("[Ulearn-Helper] 翻到下一节（" + (why || "") + " · 按按钮文字）");
                 return true;
             }
         } catch (e) { }
-        console.log("[Ulearning] 没找到「下一页/下一节」按钮（" + (why || "") + "）");
+        console.log("[Ulearn-Helper] 没找到「下一页/下一节」按钮（" + (why || "") + "）");
         return false;
     }
     // 刷课状态：同时写进面板（#ul_study_state）和状态栏（#server_status），保证一定看得见
@@ -4311,7 +4284,7 @@
             try { jquery('.mejs__button.mejs__speed-button button').eq(i).text(rate + 'x'); } catch (e) { }
                     // 恢复播放：一层层兜底（见 _ulResumeVideo），不再只试一次原生 play()
             _ulResumeVideo($v, i);
-            // 播放（原来是 title=='播放' 才动手，英文界面/标题变了就不动）
+            // 按控件结构和可用状态识别播放按钮。
             let $btn = jquery('.mejs__button.mejs__playpause-button button').eq(i);
             let title = "";
             try { title = String($btn.attr('title') || ""); } catch (e) { }
@@ -4326,9 +4299,9 @@
                     if ($m.length && !/取消静音|unmute/i.test(mt)) $m.click();
                 } catch (e) { }
             }
-        } catch (e) { console.log("[Ulearning] 刷课播放异常:", e); }
+        } catch (e) { console.log("[Ulearn-Helper] 刷课播放异常:", e); }
     }
-    // ===== 视频看门狗（独立定时器，2 秒一轮）=====
+    // 视频看门狗（独立定时器，2 秒一轮）
     // 只干一件事：发现"该在播的视频被暂停了"就把它拉起来。
     // 和 logic() 的分支链完全解耦 —— 弹窗关不掉、练习 busy 卡住、面板没消失，都不会再让它失效。
     let _ulWdBusy = false;
@@ -4349,14 +4322,14 @@
             if (!p.v || !p.v.paused || p.v.ended) return;
             _ulWdBusy = true;
             let buffering = p.v.readyState < 3;
-            console.log("[Ulearning] 看门狗：视频被暂停在 " + _mmss(p.c)
+            console.log("[Ulearn-Helper] 看门狗：视频被暂停在 " + _mmss(p.c)
                 + (buffering ? "（缓冲中 readyState=" + p.v.readyState + "）" : "") + "，尝试恢复");
             _ulLastResumeAt = 0;                                   // 绕过 800ms 防连点（看门狗 2 秒才跑一次）
             let ok = _ulResumeVideo($v, idx);
             if (!ok) _ulPlayVideo($v, idx);
             if (buffering && !ok) _ulStudyState("视频缓冲中（6 倍速下网速跟不上会自己暂停），等数据到了会自动继续");
             setTimeout(function () { _ulWdBusy = false; }, 1200);
-        } catch (e) { _ulWdBusy = false; console.log("[Ulearning] 看门狗异常:", e); }
+        } catch (e) { _ulWdBusy = false; console.log("[Ulearn-Helper] 看门狗异常:", e); }
     }
     // 扫课程目录，算"还剩几节 / 大约还有多长"
     // 目录项上通常带已完成标记（finished/done/complete）和时长文本（12:34 / 1:02:33）
@@ -4419,7 +4392,7 @@
         if (playing && pg.v && Math.abs(realRate - wantRate) > 0.05) {
             try { pg.v.playbackRate = wantRate; } catch (e) { }
             try { jquery('.mejs__button.mejs__speed-button button').eq(pending).text(wantRate + 'x'); } catch (e) { }
-            console.log("[Ulearning] 倍速被改回 " + realRate + "x，已纠正为 " + wantRate + "x");
+            console.log("[Ulearn-Helper] 倍速被改回 " + realRate + "x，已纠正为 " + wantRate + "x");
             realRate = wantRate;
         }
         let tail = playing ? "（播放中 " + realRate + "x"
@@ -4430,18 +4403,18 @@
             ? (_ulVideoDirectState.permanent ? '（已恢复播放）' : '（已恢复播放 · 间隔重试）') : '';
         tail = fallback + tail;
         _ulStudyState("刷课 " + (pending + 1) + "/" + total + tail + (_cstat ? " ｜ " + _cstat : ""));
-        // 进度日志 15 秒一条（原来每 1.5 秒刷屏）：带上真实倍速，一眼看出倍速有没有生效
+        // 进度日志每 15 秒输出一次，包含播放位置和实际倍速。
         let _ts = Date.now();
         if (pg.v && pg.d > 0 && _ts - _ulLastProgLog > 15000) {
             _ulLastProgLog = _ts;
-            console.log("[Ulearning] 本节进度 " + _mmss(pg.c) + " / " + _mmss(pg.d) + "（剩 " + _mmss(pg.remain) + "）· 实际倍速 " + realRate + "x");
+            console.log("[Ulearn-Helper] 本节进度 " + _mmss(pg.c) + " / " + _mmss(pg.d) + "（剩 " + _mmss(pg.remain) + "）· 实际倍速 " + realRate + "x");
         }
         // 暂停看门狗：记下"什么时候被暂停、我们的恢复有没有成功"
         if (_ulWasPlaying && !playing && pg.v && !pg.v.ended) {
             let pausedAt = _mmss(pg.c);
             _ulPauseLog.push({ t: _ts, at: pausedAt, resume: "" });
             while (_ulPauseLog.length > 10) _ulPauseLog.shift();
-            console.log("[Ulearning] 视频被暂停在 " + pausedAt + "，尝试恢复..");
+            console.log("[Ulearn-Helper] 视频被暂停在 " + pausedAt + "，尝试恢复..");
         }
         if (playing && _ulPauseLog.length && _ulPauseLog[_ulPauseLog.length - 1].resume === "") {
             _ulPauseLog[_ulPauseLog.length - 1].resume = "已恢复";
@@ -4450,9 +4423,7 @@
         if (!playing) _ulPlayVideo($v, pending);
     }
 
-    // ===== 课件页「普通练习」的取值兜底 =====
-    // 原来这些值都是"一步到位"地取：.attr('id').substring(4) —— 页面一改版就抛异常，
-    // 异常冒到 setInterval 回调里，整段练习逻辑每 1.5 秒崩一次，表现就是"完全不会自动答题"。
+    // 课件页练习控件读取。
     function _ulPageId() {
         try {
             let $p = jquery('.page-name.active').parent();
@@ -4550,14 +4521,14 @@
         const valid = opts.valid || (() => !opts.signal || !opts.signal.aborted);
         if (!valid()) return 0;
         let filled = 0;
-        try { filled = await Object.assign({}, respondent, { _valid: valid, _filled: 0 })._answer(parentId, $q) || 0; } catch (e) { console.log('[Ulearning] 练习直读异常:', e); }
+        try { filled = await Object.assign({}, respondent, { _valid: valid, _filled: 0 })._answer(parentId, $q) || 0; } catch (e) { console.log('[Ulearn-Helper] 练习直读异常:', e); }
         if (!valid()) return 0;
         if (filled) return filled;
         let q;
         try { q = Util._read_question($q.get(0), 'homework'); } catch (e) { return 0; }
         if (!q || !q.title) return 0;
         try { return await Util.get_answer(q.title, q.quetype, null, $q, 'practice', Object.assign({}, opts, { requireFilled: true, valid })) || 0; }
-        catch (e) { console.log('[Ulearning] 练习查询失败:', e); return 0; }
+        catch (e) { console.log('[Ulearn-Helper] 练习查询失败:', e); return 0; }
     }
     function _ulPracticeCompleted($buttons) {
         let completed = false;
@@ -4675,7 +4646,7 @@
             if (this._valid && !this._valid()) return 0;
             this.parentId = parentId;
             this.$questionNode = $questionNode;
-            // 原来这里 .attr('id').substring(8)：id 取不到就抛异常，整段练习逻辑直接崩
+            // 读取题目 ID 时验证属性和格式，缺失时使用安全回退。
             this.questionId = _ulQuestionId($questionNode);
             let questionType = "";
             try { questionType = String($questionNode.find('.question-type-tag').first().text() || "").trim(); } catch (e) { }
@@ -4683,7 +4654,7 @@
                 let k = _ulPracticeKind($questionNode);      // 标签认不出就按结构猜
                 questionType = k == "multi" ? "多选题" : k == "single" ? "单选题" : k == "judge" ? "判断题"
                     : k == "blank" ? "填空题" : k == "essay" ? "简答题" : k == "wordbank" ? "选词填空" : k == "rank" ? "排序题" : "";
-                if (questionType) console.log("[Ulearning] 练习题型标签没读到，按结构判定为:", questionType);
+                if (questionType) console.log("[Ulearn-Helper] 练习题型标签没读到，按结构判定为:", questionType);
             }
             switch (questionType) {
                 case '多选题': {
@@ -4733,8 +4704,8 @@
                     break;
                 }
                 default: {
-                    // 认不出的题型：给一次机会，按选项控件硬填（原来的 default 什么都不做）
-                    console.log("[Ulearning] 练习题类型认不出（标签：\"" + questionType + "\"），尝试按选项控件作答");
+                    // 未知题型按已识别的选项控件尝试填写。
+                    console.log("[Ulearn-Helper] 练习题类型认不出（标签：\"" + questionType + "\"），尝试按选项控件作答");
                     break;
                 }
             }
@@ -4794,7 +4765,7 @@
         async _syncGetAnswer() {
             let res_answer = { correctAnswerList: [], subQuestionAnswerDTOList: [] };
             if (!this.questionId) {                       // 题目 id 没读到就别发这个必然失败的请求
-                console.log("[Ulearning] 没读到题目 id，跳过平台答案接口（改用本地题库/AI）");
+                console.log("[Ulearn-Helper] 没读到题目 id，跳过平台答案接口（改用本地题库/AI）");
                 return res_answer;
             }
             try {
@@ -4802,7 +4773,7 @@
                     jquery.ajax({ url: 'https://api.ulearning.cn/questionAnswer/' + encodeURIComponent(this.questionId) + '?parentId=' + encodeURIComponent(this.parentId),
                         async: true, timeout: 10000, success: xhr => resolve(xhr && typeof xhr === 'object' ? xhr : {}), error: () => resolve({}) });
                 });
-            } catch (e) { console.log("[Ulearning] 获取官方答案失败:", e); }
+            } catch (e) { console.log("[Ulearn-Helper] 获取官方答案失败:", e); }
             if (this._valid && !this._valid()) return { correctAnswerList: [], subQuestionAnswerDTOList: [] };
             // 保证形状正确：接口返回缺字段时后面 .length 会抛异常
             if (!Array.isArray(res_answer.correctAnswerList)) res_answer.correctAnswerList = [];
@@ -4814,7 +4785,7 @@
                     let q = Util._read_question(this.$questionNode.get(0), "homework");
                     if (q && q.title) {
                         Bank.save(q.title, txt, "paper", q.options, q);
-                        console.log("[Ulearning] 平台答案已收录进本地题库:", txt);
+                        console.log("[Ulearn-Helper] 平台答案已收录进本地题库:", txt);
                     }
                 }
             } catch (e) { }
@@ -5043,10 +5014,8 @@
                 } catch (e) { }
             });
         } catch (e) { }
-        // 不再注入 layui（设置面板已改为自建 UI，零外部依赖、少两个网络请求）
-        // ⚠ 这里是加载期同步调用：每一步都必须独立兜底，否则异常会中断脚本主体，
-        //   导致后面定义的状态层/设置面板永远初始化不了（历史 bug：设置打不开）
-        let safe = function (fn, tag) { try { fn(); } catch (e) { console.log("[Ulearning] " + tag + " 异常:", e); } };
+        // 加载期同步初始化逐项捕获异常，避免单个模块失败中断后续定义。
+        let safe = function (fn, tag) { try { fn(); } catch (e) { console.log("[Ulearn-Helper] " + tag + " 异常:", e); } };
         safe(Re_Write, "Re_Write");
         safe(Init, "Init");
         safe(Set_Heart, "Set_Heart");
@@ -5111,7 +5080,7 @@ function Init() {
             style = document.createElement("style");
             style.id = "ul-panel-css";
             style.innerHTML = `
-        /* ================= 优学院小助手 UI 设计规范（浅色/暗色自适应） ================= */
+        /* Ulearn-Helper 界面样式（浅色/暗色自适应） */
         :root {
             --ul-bg: #ffffff;
             --ul-bg-soft: #f7faff;
@@ -5152,7 +5121,7 @@ function Init() {
                 --ul-shadow: 0 14px 36px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
             }
         }
-        /* ===== 悬浮窗 ===== */
+        /* 悬浮窗 */
         .ul-panel {
             position: fixed; top: 54px; left: 50px; width: 336px;
             background: var(--ul-bg); color: var(--ul-fg);
@@ -5364,8 +5333,7 @@ function Init() {
         } catch (e) { }
         Bind();
         ScriptUpdates.notify();
-        // ===== 拖动：只从标题栏拖动（旧版挂在整块面板上，鼠标一动就整窗跟着跑，
-        //       点单元格的 click 被拖拽吃掉 → "点击复制无效"）。再加 4px 阈值双保险。
+        // 悬浮窗仅允许从标题栏拖动，并使用 4px 移动阈值区分点击。
         let head = null;
         try { head = div.querySelector(".ul-head"); } catch (e) { }
         let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
@@ -5399,7 +5367,7 @@ function Init() {
                 dragging = false;
                 // 记住面板位置（下次打开/刷新还在原地）
                 try {
-                    GM_setValue("panel_pos", JSON.stringify({ left: set.left, top: set.top }));   // 兼容旧版
+                    GM_setValue("panel_pos", JSON.stringify({ left: set.left, top: set.top }));   // 保留已有位置配置。
                     ConfigStore.patch("ui.panelPos", { left: Math.round(set.left), top: Math.round(set.top) });
                 } catch (e) { }
             }
@@ -5437,7 +5405,7 @@ function Init() {
             let gear = div.querySelector(".ul-gear");
             if (gear) gear.addEventListener("click", function (e) {
                 e.stopPropagation();
-                try { openSettings(); } catch (err) { console.log("[Ulearning] 打开设置失败:", err); }
+                try { openSettings(); } catch (err) { console.log("[Ulearn-Helper] 打开设置失败:", err); }
             });
             // 最小化状态下点左上角的"助"展开
             let lg = div.querySelector(".ul-logo");
@@ -5565,7 +5533,7 @@ function Init() {
         } catch (e) { }
     }
     try { _ulSyncPanelMode(); } catch (e) {}
-    try { AiStatus(); } catch (e) { console.log("[Ulearning] 状态栏刷新异常:", e); }
+    try { AiStatus(); } catch (e) { console.log("[Ulearn-Helper] 状态栏刷新异常:", e); }
     try { KillAntiCheat(); } catch (e) { }
     try {
         // 课程页（地址可能带 ?query 或 #hash，所以用包含判断而不是全等）
@@ -5588,17 +5556,14 @@ function Init() {
 
 function getToken(info){
     return new Promise(function(success, fail){
-        // 原作者的卡密/授权流程依赖已下线的 tk.fm90.cn 与 layui，这里直接放行（不再弹窗）
-        console.log("[Ulearning] 授权流程已废弃，直接放行");
+        // 兼容旧调用：授权占位函数直接返回成功。
+        console.log("[Ulearn-Helper] 授权流程已废弃，直接放行");
         try { GM_setValue('yToken', true); } catch (e) { }
         success();
     });
 }
 
-// 是不是"考试/作业"页面？模拟全屏只对这类页面有意义。
-// 课件/视频页必须保留真实全屏 —— 否则 Element.prototype.requestFullscreen 被换成空实现，
-// 视频的"全屏"按钮点了没反应（用户反馈的"课件页接口失效"）。
-// 放在模块作用域（函数声明会提升），__ul.examPage() 也用它自检。
+// 按页面类型选择全屏行为，课件页保留原生视频全屏。
 function _ulIsStudyPage(uu) {
     const u = String(uu == null ? location.href : uu);
     let route=u;
@@ -5632,7 +5597,7 @@ function _isExamLikePage(uu, hh) {
 function KillAntiCheat() {
     if (KillAntiCheat._done) { KillAntiCheat._assert(); KillAntiCheat._exitFS(); return; }
     KillAntiCheat._done = true;
-    // ===== 诊断开关：记录平台对全屏/可见性/尺寸 API 的读取与调用，用于定位检测手段 =====
+    // 诊断开关：记录平台对全屏/可见性/尺寸 API 的读取与调用，用于定位检测手段
     // 定位完成后把 KillAntiCheat.DIAG 改为 false 即可关闭
     KillAntiCheat.DIAG = false;   // 排障时改 true：会打印平台对全屏/可见性 API 的读取栈
     let _diag = function (tag, extra) {
@@ -5640,8 +5605,8 @@ function KillAntiCheat() {
         let n = (_diag.n = (_diag.n || 0) + 1);
         try {
             let st = (new Error().stack || "").split("\n").slice(2, 5).join(" <- ");
-            console.log("[Ulearning-DIAG][" + tag + "] #" + n + (extra ? " " + extra : "") + " | " + st);
-        } catch (e) { try { console.log("[Ulearning-DIAG][" + tag + "] #" + n); } catch (e2) { } }
+            console.log("[Ulearn-Helper-DIAG][" + tag + "] #" + n + (extra ? " " + extra : "") + " | " + st);
+        } catch (e) { try { console.log("[Ulearn-Helper-DIAG][" + tag + "] #" + n); } catch (e2) { } }
     };
     // 全屏策略开关：
     //   true（默认）= 模拟全屏：拦截真实全屏，伪造 fullscreenElement/fullscreenchange 事件，
@@ -5744,7 +5709,7 @@ function KillAntiCheat() {
     //    - 平台调用 requestFullscreen 时同步派发 fullscreenchange 事件，入口检测同样通过
     //    - exitFullscreen 被拦截：即使真实全屏被 Esc 退出，平台看到的仍是全屏状态
     if (!KillAntiCheat.KILL_FULLSCREEN) {
-        console.log("[Ulearning] 课件/视频等页面：保留真实全屏（不模拟），视频全屏按钮正常");
+        console.log("[Ulearn-Helper] 课件/视频等页面：保留真实全屏（不模拟），视频全屏按钮正常");
     }
     if (KillAntiCheat.KILL_FULLSCREEN) {
         // 模拟模式下从启动起就是"已全屏"：
@@ -5813,7 +5778,7 @@ function KillAntiCheat() {
             try { if (document[m]) document[m] = _exit; } catch (e) { }
             try { if (Document.prototype[m]) Document.prototype[m] = _exit; } catch (e) { }
         });
-        console.log("[Ulearning] 已启用模拟全屏 @", window.top === window.self ? "顶层" : "iframe", "| DIAG 开启中");
+        console.log("[Ulearn-Helper] 已启用模拟全屏 @", window.top === window.self ? "顶层" : "iframe", "| DIAG 开启中");
         // 接管 window.screenfull（平台用 screenfull.fullscreenchange(cb) 注册全屏回调，
         // 用 screenfull.isFullscreen 判断是否全屏）：
         // 无论平台何时创建/覆盖 screenfull，读取到的都是"恒在全屏"的替身，
@@ -5862,10 +5827,10 @@ function KillAntiCheat() {
         try {
             let s = typeof fn == 'string' ? fn : String(fn);
             if (/debugger/.test(s)) return true;
-            if (/leaveSeconds/.test(s)) { console.log("[Ulearning] 已掐断离开倒计时定时器"); return true; }
+            if (/leaveSeconds/.test(s)) { console.log("[Ulearn-Helper] 已掐断离开倒计时定时器"); return true; }
             // 掐断"离开检测"200ms 轮询：回调里维护 isLeave/isLockScreenSelecting 的就是它。
             // 轮询不转 → isLeave 恒 false → "离开考试"提醒/离开页永远不会产生（从根上解决）。
-            if (/isLeave|isLockScreenSelecting/.test(s)) { console.log("[Ulearning] 已掐断离开检测轮询(200ms)"); return true; }
+            if (/isLeave|isLockScreenSelecting/.test(s)) { console.log("[Ulearn-Helper] 已掐断离开检测轮询(200ms)"); return true; }
         } catch (e) { }
         return false;
     };
@@ -5886,7 +5851,7 @@ function KillAntiCheat() {
         }
     }, 1500);
 }
-// ===================== 上报防火墙 =====================
+// 上报防火墙
 // 平台在进入考试瞬间的短暂窗口（isFullSreen 尚未置位）会让 isLeave=true 并启动
 // 60 秒倒计时，随后必然调用 saveLeaveCount() 把"离开考试"记录上报服务端。
 // 这里做三层保险，保证服务端永远收不到任何离开/异常行为数据：
@@ -6027,7 +5992,7 @@ function NoReport() {
                     if (d && d.data && typeof d.data == 'object' && fix(d.data)) ch = true;
                     if (d && d.result && typeof d.result == 'object' && fix(d.result)) ch = true;
                     if (ch) {
-                        console.log("[Ulearning] 已清洗离开信息接口响应:", u2);
+                        console.log("[Ulearn-Helper] 已清洗离开信息接口响应:", u2);
                         return JSON.stringify(d);
                     }
                 } catch (e) { }
@@ -6082,7 +6047,7 @@ function NoReport() {
                         let isBehavior = RB.test(this.__u);          // 学习进度：只清洗、不吞
                         if (this.__m == 'POST' && !isBehavior && (R.test(this.__u) || (body && String(body).indexOf('leaveTime') != -1 && !isAnswerApi))) {
                             _rep('拦截', this.__m, this.__u);
-                            console.log("[Ulearning] 已拦截离开上报 POST:", this.__u);
+                            console.log("[Ulearn-Helper] 已拦截离开上报 POST:", this.__u);
                             // 不能静默 return（调用方会永远等不到完成）→ 伪造一个 200 完成
                             try {
                                 Object.defineProperty(this, 'responseText', { configurable: true, get: function () { return '{"code":1}'; } });
@@ -6106,7 +6071,7 @@ function NoReport() {
                         if (isBehavior) _rep(nb !== null ? '清洗放行' : '放行', this.__m, this.__u);
                     } catch (e) { }
                     if (nb !== null) {
-                        console.log("[Ulearning] 已清洗放行请求的离开字段:", this.__u);
+                        console.log("[Ulearn-Helper] 已清洗放行请求的离开字段:", this.__u);
                         return oss.call(this, nb);
                     }
                     return oss.apply(this, arguments);
@@ -6128,14 +6093,14 @@ function NoReport() {
                     let isBehavior = RB.test(u);
                     if (m == 'POST' && !isBehavior && (R.test(u) || (body.indexOf('leaveTime') != -1 && !isAnswerApi))) {
                         _rep('拦截', m, u);
-                        console.log("[Ulearning] 已拦截离开上报 fetch:", u);
+                        console.log("[Ulearn-Helper] 已拦截离开上报 fetch:", u);
                         return Promise.resolve(new Response('{}', { status: 200, statusText: 'OK', headers: { 'Content-Type': 'application/json' } }));
                     }
                     if (m == 'POST') nb = scrubLeave(body);
                     if (isBehavior) _rep(nb !== null ? '清洗放行' : '放行', m, u);
                 } catch (e) { }
                 if (nb !== null) {
-                    console.log("[Ulearning] 已清洗放行 fetch 请求的离开字段:", u);
+                    console.log("[Ulearn-Helper] 已清洗放行 fetch 请求的离开字段:", u);
                     // 克隆 init 再改：不污染调用方对象（同一 init 被复用时会带上被改写的 body）
                     let ni = (init && typeof init == "object") ? Object.assign({}, init, { body: nb }) : { method: m, body: nb };
                     return wf.call(window, input, ni);
@@ -6158,7 +6123,7 @@ function NoReport() {
                         else if (typeof data == 'object' && data.toString) { try { d = data.toString(); } catch (e) { } }
                     }
                     if (/(leave|behavior|examlimit|切屏|离开)/i.test(s) || (d && /(leaveTime|saveBehavior|离开|异常)/i.test(d))) {
-                        console.log("[Ulearning] 已拦截 sendBeacon 上报:", s);
+                        console.log("[Ulearn-Helper] 已拦截 sendBeacon 上报:", s);
                         return true;
                     }
                 } catch (e) { }
@@ -6166,23 +6131,10 @@ function NoReport() {
             };
         }
     } catch (e) { }
-    console.log("[Ulearning] 上报防火墙已开启：离开/行为数据不会送达服务端");
+    console.log("[Ulearn-Helper] 上报防火墙已开启：离开/行为数据不会送达服务端");
 }
 
-// ===================== 切屏/离开检测总闸（LeaveShield） =====================
-// 用户实测：警告文字没了，但平台"依然判定切屏"（弹框/计数/倒计时仍在走）。
-// 说明之前只堵了 UI 与上报，没有堵"检测本身"。平台的检测入口有 5 个，这里逐个硬封：
-//   1) 可见性/焦点/指针锁 API：document.hidden、visibilityState、hasFocus、pointerLockElement
-//      （实例 + 原型双写，任何读法都是"页面可见且在前台"）
-//   2) 属性式监听器：window.onblur / document.onvisibilitychange 一类赋值直接吞掉
-//      （旧版每 1.5s 才清一次，中间存在能被触发的空档；这里改成永久失效）
-//   3) 事件层：脚本启动"之前"就注册好的 visibilitychange/blur/pointerlockchange 监听器
-//      无法注销，改为 window 捕获阶段 stopImmediatePropagation（只掐 window/document 级，
-//      输入框自己的 blur 照常触发，简答题失焦保存不受影响）
-//   4) Vue 组件状态：把 isLeave/showLeave 锁死为 false、isFocus/isFullSreen 锁死为 true、
-//      leaveCount/leaveSeconds/leaveTime 锁死为 0 —— 就算前端判定成功也写不进状态，
-//      弹框不会出现、计数不会增长、倒计时不会启动
-//   5) 行为上报事件：$emit('saveBehavior', '离开页面'/'异常') 直接丢弃
+// 页面环境处理：覆盖可见性、焦点事件、组件状态和行为上报；保留答题控件的失焦保存。
 function LeaveShield() {
     if (LeaveShield.done) return;
     LeaveShield.done = true;
@@ -6190,7 +6142,7 @@ function LeaveShield() {
     let log1 = function (k, msg) {
         if (once[k] || logs > 30) return;
         once[k] = 1; logs++;
-        try { console.log("[Ulearning] " + msg); } catch (e) { }
+        try { console.log("[Ulearn-Helper] " + msg); } catch (e) { }
     };
     let fake = function (obj, k, v) {
         try {
@@ -6201,7 +6153,7 @@ function LeaveShield() {
     let D = document;
     let DP = null;
     try { DP = (window.Document && window.Document.prototype) || null; } catch (e) { }
-    // ---- 1) 可见性/焦点/指针锁全量伪造（实例 + 原型） ----
+    // 1) 可见性/焦点/指针锁全量伪造（实例 + 原型）
     let VIS = [['hidden', false], ['webkitHidden', false], ['mozHidden', false], ['msHidden', false],
         ['visibilityState', 'visible'], ['webkitVisibilityState', 'visible'], ['mozVisibilityState', 'visible'], ['msVisibilityState', 'visible']];
     let reFake = function () {
@@ -6221,11 +6173,11 @@ function LeaveShield() {
     });
     // hasFocus 恒真：实例（KillAntiCheat 已做）+ 原型双保险
     try { fake(DP, 'hasFocus', function () { return true; }); } catch (e) { }
-    // ---- 2) 属性式监听器永久失效 ----
+    // 2) 属性式监听器永久失效
     ['onblur', 'onvisibilitychange', 'onwebkitvisibilitychange', 'onmozvisibilitychange', 'onmsvisibilitychange',
         'onpointerlockchange', 'onpointerlockerror', 'onmouseleave', 'onmouseout', 'onpagehide', 'onpageshow', 'onfreeze', 'onresume'
     ].forEach(function (k) { fake(window, k, null); fake(D, k, null); });
-    // ---- 3) 捕获阶段掐断"脚本启动前已注册"的检测监听器 ----
+    // 3) 捕获阶段掐断"脚本启动前已注册"的检测监听器
     // 注意：KillAntiCheat 把 window/document 的 addEventListener 换成了丢包版，
     // 所以这里必须走原生 EventTarget.prototype.addEventListener，否则自己的监听器也被丢
     let natAdd = null;
@@ -6268,7 +6220,7 @@ function LeaveShield() {
             try { if (Element.prototype[m]) Element.prototype[m] = function () { return Promise.resolve(); }; } catch (e) { }
         });
     } catch (e) { }
-    // ---- 4) Vue 反作弊状态锁 ----
+    // 4) Vue 反作弊状态锁
     // 只锁"防作弊专属"字段名：绝不碰 leftTime/leftCount/num/total/count/second 这类
     // 通用名（可能是剩余时间/题量/选项数，锁了会导致界面状态乱跳）
     let FALSE_RE = /^(isLeave|isLeaveExam|isLeavePage|isLeaveScreen|isLeaveFlag|leaveFlag|leaveShow|showLeave|leaveVisible|leaveDialogVisible|showLeaveDialog|leaveDialog|leaveDialogShow)$/i;
@@ -6409,24 +6361,17 @@ function LeaveShield() {
         }, 700);
     } catch (e) { }
     try { setTimeout(function () { reFake(); sweepVue(); }, 1500); } catch (e) { }
-    console.log("[Ulearning] 切屏检测总闸已开启：可见性/失焦事件 + Vue 离开状态全部锁死");
+    console.log("[Ulearn-Helper] 切屏检测总闸已开启：可见性/失焦事件 + Vue 离开状态全部锁死");
 }
 
-// ===================== 警告吞噬层（v2.1.15 默认关闭） =====================
-// 用户明确要求：不要删/改页面文字，只要"不检测、不上报"。
-// 因此本层默认不执行（WarningEater.ENABLE = false），页面文字保持原样。
-// 防作弊交由 KillAntiCheat + LeaveShield（不检测）与 NoReport（不上报）处理。
-// 如需恢复"删警告文字"，把 WarningEater.ENABLE 改成 true。
+// 页面文字处理默认关闭，保留原始题目和提示文本。
 function WarningEater() {
     if (WarningEater.done) return;
     WarningEater.done = true;
-    // ===== v2.1.15 用户要求：脚本不再删改/隐藏页面上的任何文字 =====
-    // 防作弊从源头解决：不检测（KillAntiCheat + LeaveShield）+ 不上报（NoReport）。
-    // 页面本来就不该出现警告；即使出现也保持原样，脚本不碰一个字。
-    // 想恢复旧的"删警告文字"行为，把下面这行改成 true 即可。
+    // 保持页面文字和布局不变。
     WarningEater.ENABLE = false;
     if (!WarningEater.ENABLE) {
-        console.log("[Ulearning] 文字清理层已关闭：不改动页面任何文字，只做「不检测 + 不上报」");
+        console.log("[Ulearn-Helper] 文字清理层已关闭：不改动页面任何文字，只做「不检测 + 不上报」");
         return;
     }
     // 平台文案版本很多：禁止退出全屏 / 不得退出全屏 / 请勿退出全屏 / 请勿离开考试界面 /
@@ -6537,7 +6482,7 @@ function WarningEater() {
                 if (!/知道了|关闭|好的|返回考试/.test(bt)) return;
             }
             autoClosed.add(root);
-            console.log("[Ulearning] 已自动确认防作弊警告框");
+            console.log("[Ulearn-Helper] 已自动确认防作弊警告框");
             setTimeout(function () {
                 try { btns[0].dispatchEvent(new Event('click', { bubbles: true })); } catch (e) { }
             }, 500);
@@ -6560,7 +6505,7 @@ function WarningEater() {
             if (!bt) return;
             if (/交卷|提交|退出考试|开始考试|进入考试|同意|放弃/.test(bt)) return;
             dismissed.add(root);
-            console.log("[Ulearning] 已关闭空的防作弊警告框(按钮: " + bt + ")");
+            console.log("[Ulearn-Helper] 已关闭空的防作弊警告框(按钮: " + bt + ")");
             setTimeout(function () { try { btns[0].dispatchEvent(new Event('click', { bubbles: true })); } catch (e) { } }, 400);
         } catch (e) { }
     };
@@ -6584,7 +6529,7 @@ function WarningEater() {
                         try {
                             let nv = n.nodeValue;
                             let clean = stripWarnSentences(nv);
-                            if (clean != nv) { n.nodeValue = clean; console.log("[Ulearning] 已移除防作弊警告句(保留其余文字)"); }
+                            if (clean != nv) { n.nodeValue = clean; console.log("[Ulearn-Helper] 已移除防作弊警告句(保留其余文字)"); }
                         } catch (e) { }
                     } else {
                         let beforeLen = t.length;
@@ -6611,7 +6556,7 @@ function WarningEater() {
             try { kids = el.querySelectorAll('*').length; } catch (e) { }
             if (t.length > 400 || kids > 4 || !isPureWarnText(t)) { scrubTextNodes(el); return; }
             try { el.style.setProperty('display', 'none', 'important'); } catch (e) { }
-            console.log("[Ulearning] 已隐藏一条防作弊警告(纯文本横幅)");
+            console.log("[Ulearn-Helper] 已隐藏一条防作弊警告(纯文本横幅)");
         } catch (e) { }
     };
     // 入场兜底扫描：MutationObserver 可能漏掉"脚本启动前就渲染好"或层级过深的文案，
@@ -6653,7 +6598,7 @@ function WarningEater() {
     } catch (e) { }
 }
 
-// ===================== 开始考试弹窗：解除倒计时禁用 =====================
+// 开始考试弹窗：解除倒计时禁用
 // 平台的"开始考试/须知"提示框里有 N 秒倒计时，未走完"确定"按钮是灰的、点不动。
 // 这里只做两件事：① 按钮处于禁用态时立刻解锁（去 disabled/禁用样式）；
 // ② 把该组件链上 1..60 的倒计时数字字段归零，让按钮立即可点。
@@ -6720,7 +6665,7 @@ function FastStart() {
                                 // time/count/num/total/left 这类通用名一律不动（历史事故：题量/剩余时间被清零 → 选项乱跳/自动交卷）
                                 let hit = RE1.test(k) ? (v <= 60) : false;
                                 if (hit) {
-                                    try { q[k] = 0; console.log("[Ulearning] 已归零开始考试倒计时字段:", k, "=", v); } catch (e) { }
+                                    try { q[k] = 0; console.log("[Ulearn-Helper] 已归零开始考试倒计时字段:", k, "=", v); } catch (e) { }
                                 }
                             }
                         }
@@ -6775,13 +6720,12 @@ function FastStart() {
                     line = (p.tagName ? p.tagName.toLowerCase() : '') + (cls ? '.' + cls : '') + ' > ' + line;
                     p = p.parentNode;
                 }
-                console.log("[Ulearning][DIAG] 倒计时锁定按钮祖先链:", line);
-                try { console.log("[Ulearning][DIAG] 按钮HTML:", b.outerHTML.slice(0, 300)); } catch (e) { }
+                console.log("[Ulearn-Helper][DIAG] 倒计时锁定按钮祖先链:", line);
+                try { console.log("[Ulearn-Helper][DIAG] 按钮HTML:", b.outerHTML.slice(0, 300)); } catch (e) { }
             }
         } catch (e) { }
     };
-    // 自动勾选协议（用户需求）：只勾"协议/同意"复选框
-    // ⚠ 绝不能碰 radio / 选项组：旧版把全页未勾选的单选框都勾上，导致"选项乱跳"（已修）
+    // 只处理协议复选框，不操作题目选项和单选组。
     let AGREE_RE = /(同意|协议|承诺|遵守|已阅读|阅读并|须知|诚信|知晓|接受)/;
     let checkLogN = 0;
     // 选项组判别：向上 4 层内若存在"多于 1 个勾选框/单选框"的容器 → 这是题目选项区，永不自动勾选
@@ -6817,7 +6761,7 @@ function FastStart() {
                 cb.checked = true;
                 try { cb.dispatchEvent(new Event('click', { bubbles: true })); } catch (e) { }
                 try { cb.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) { }
-                if (checkLogN < 3) { checkLogN++; console.log("[Ulearning] 已自动勾选协议复选框"); }
+                if (checkLogN < 3) { checkLogN++; console.log("[Ulearn-Helper] 已自动勾选协议复选框"); }
             }
         } catch (e) { }
     };
@@ -6833,7 +6777,7 @@ function FastStart() {
     };
     let work = function () {
         try {
-            // ===== 第一层：全局扫描所有可点击元素（不依赖容器识别）=====
+            // 第一层：全局扫描所有可点击元素（不依赖容器识别）
             let bs = null;
             try { bs = document.querySelectorAll(BTN); } catch (e) { }
             if (bs) {
@@ -6851,7 +6795,7 @@ function FastStart() {
                     }
                 }
             }
-            // ===== 第二层：容器级兜底（弹窗秒文本、pointer-events 穿透）=====
+            // 第二层：容器级兜底（弹窗秒文本、pointer-events 穿透）
             let BOX = '.el-dialog, .el-message-box, .layui-layer, .el-drawer, .el-popup, [class*="dialog"], [class*="modal"], [class*="mask"], [class*="popup"], [class*="layer"], [class*="notice"], [class*="confirm"], [class*="start"], [class*="alert"], [class*="begin"]';
             let boxes = document.querySelectorAll(BOX);
             for (let i = 0; i < boxes.length; i++) {
@@ -6919,10 +6863,10 @@ function FastStart() {
             _tickTimer = setTimeout(function () { _tickTimer = null; tick(); }, 200);
         }).observe(document.documentElement || document, { childList: true, subtree: true });
     } catch (e) { }
-    console.log("[Ulearning] 开始考试弹窗倒计时限制已解除（按钮立即可点，不会自动点）");
+    console.log("[Ulearn-Helper] 开始考试弹窗倒计时限制已解除（按钮立即可点，不会自动点）");
 }
 
-// ===================== 反作弊源码取证器 =====================
+// 反作弊源码取证器
 // 抓取页面内联/外链脚本源码中与"全屏/离开检测"相关的片段打印到控制台，
 // 一次跑测即可看到平台检测代码长什么样，方便后续精准对抗。
 function AntiCheatProbe() {
@@ -6946,7 +6890,7 @@ function AntiCheatProbe() {
                     let key = where + "|" + KW[i];
                     if (!AntiCheatProbe.printed[key]) {
                         AntiCheatProbe.printed[key] = true;
-                        console.log("[Ulearning-PROBE][" + tag + "] @" + where + " 命中: " + KW[i] + "\n---\n" + text.substring(Math.max(0, idx - 800), idx + 800) + "\n---");
+                        console.log("[Ulearn-Helper-PROBE][" + tag + "] @" + where + " 命中: " + KW[i] + "\n---\n" + text.substring(Math.max(0, idx - 800), idx + 800) + "\n---");
                     }
                     start = idx + KW[i].length;
                 }
@@ -6986,15 +6930,11 @@ function AntiCheatProbe() {
     }, 4000);
 }
 //隐藏
-    // ========================================================================
-    // [UI-1..7] 设置面板（自建 Shell，无 layui）：状态层 → Schema → 视图 → 动作
-    // ========================================================================
-    // ========================================================================
+    // 设置面板：配置状态、字段、视图与操作。
     // 自建 UI 组件（Toast / Confirm / Shell / Field / ReorderList）
-    // ========================================================================
     const UI = {
         _root: null,
-        // ---------- 样式（只注入一次）----------
+        // 样式（只注入一次）
         _ensureCSS() {
             if (document.getElementById("ul-ui-css")) return;
             try {
@@ -7125,7 +7065,7 @@ function AntiCheatProbe() {
                 (document.head || document.documentElement).appendChild(s);
             } catch (e) { }
         },
-        // ---------- 小工具 ----------
+        // 小工具
         el(tag, attrs, kids) {
             let n = document.createElement(tag);
             if (attrs) for (let k in attrs) {
@@ -7148,7 +7088,7 @@ function AntiCheatProbe() {
                 t = setTimeout(function () { t = null; fn.apply(self, args); }, ms || 400);
             };
         },
-        // ---------- Toast ----------
+        // Toast
         toast(msg, kind) {
             try {
                 let old = document.querySelector(".ul-toast-live");
@@ -7183,7 +7123,7 @@ function AntiCheatProbe() {
                 else if (el.__parent) el.__parent.removeChild(el);
             } catch (e) { }
         },
-        // ---------- Confirm ----------
+        // Confirm
         confirm(opts) {
             return new Promise(function (resolve) {
                 let closed = false;
@@ -7215,7 +7155,7 @@ function AntiCheatProbe() {
                 try { (card.querySelector("button.ul-btn-primary") || card.querySelector("button")).focus(); } catch (e) { }
             });
         },
-        // ---------- 字段渲染 ----------
+        // 字段渲染
         field(f, state) {
             // 没传 state 时用当前配置：否则 getPath(undefined) 恒为 undefined → 输入框永远空白，
             // 看起来像"上次填的内容没保存"（其实配置一直在，只是没回显）
@@ -7334,7 +7274,7 @@ function AntiCheatProbe() {
             }
             return cur;
         },
-        // ---------- 可排序来源列表 ----------
+        // 可排序来源列表
         sourceList(onChange) {
             let box = this.el("div", { class: "ul-src-list" });
             let dragRow = null, startY = 0, active = false;
@@ -7460,7 +7400,7 @@ function AntiCheatProbe() {
         pane() {
             return this.el("div", { class: "ul-pane", style: "display:flex;flex-direction:column;gap:10px;" });
         },
-        // ---------- 兜底对话框：UI 出异常时至少让用户看到原因并提供复制 ----------
+        // 兜底对话框：UI 出异常时至少让用户看到原因并提供复制
         fallback(err) {
             try {
                 let msg = String((err && (err.stack || err.message)) || err);
@@ -7476,7 +7416,7 @@ function AntiCheatProbe() {
                 p.textContent = msg;
                 let tip = document.createElement("div");
                 tip.setAttribute("style", "margin-top:10px;color:#8494a8;font-size:12px;");
-                tip.textContent = "把上面的红字发给作者即可定位；按 ESC 关闭。";
+                tip.textContent = "复制错误信息后可在 GitHub 提交问题；按 ESC 关闭。";
                 let row = document.createElement("div");
                 row.setAttribute("style", "display:flex;gap:8px;justify-content:flex-end;margin-top:14px;");
                 let mk = function (text, danger) {
@@ -7516,7 +7456,7 @@ function AntiCheatProbe() {
                 }, 15000);
             } catch (e) { }
         },
-        // 一键关掉所有小助手弹层（控制台应急：__ul.ui.closeAll()）
+        // 一键关掉所有 Ulearn-Helper 弹层（控制台应急：__ul.ui.closeAll()）
         closeAll() {
             try {
                 this.close();
@@ -7527,7 +7467,7 @@ function AntiCheatProbe() {
                 return true;
             } catch (e) { return false; }
         },
-        // ---------- Shell ----------
+        // Shell
         close() {
             try {
                 if (this._root && this._root.parentNode) this._root.parentNode.removeChild(this._root);
@@ -7557,9 +7497,9 @@ function AntiCheatProbe() {
         },
         render() {   // 重画当前页（状态变化时调用）—— 三段各自兜底，单点失败不再整页空白
             if (!this._root) return;
-            try { this._renderRail(); } catch (e) { console.log("[Ulearning] 左栏渲染异常:", e); }
-            try { this._renderContent(); } catch (e) { console.log("[Ulearning] 内容渲染异常:", e); this._showRenderError(e); }
-            try { this._renderFoot(); } catch (e) { console.log("[Ulearning] 页脚渲染异常:", e); }
+            try { this._renderRail(); } catch (e) { console.log("[Ulearn-Helper] 左栏渲染异常:", e); }
+            try { this._renderContent(); } catch (e) { console.log("[Ulearn-Helper] 内容渲染异常:", e); this._showRenderError(e); }
+            try { this._renderFoot(); } catch (e) { console.log("[Ulearn-Helper] 页脚渲染异常:", e); }
         },
         // 内容渲染失败时，把真实错误显示在内容区（用户可直接截图发回来）
         _showRenderError(e) {
@@ -7613,10 +7553,7 @@ function AntiCheatProbe() {
                 let olds = document.querySelectorAll(".ul-ovl");
                 for (let i = 0; i < olds.length; i++) if (olds[i] !== ovl) UI.drop(olds[i]);
             } catch (e) { }
-            // ===== 拖动（标题栏）/ 缩放（右下角）=====
-            // 用 Pointer Events + setPointerCapture：鼠标移出标题栏/窗口、甚至划过页面内嵌 iframe
-            // 也照样收到事件（旧版用 document 上的 mousemove，跨 iframe 会丢事件 → "不跟手"）。
-            // 位置用「增量位移」累加，且按下瞬间先把卡片钉在当前视觉位置，避免绝对定位跳位。
+            // 拖动和缩放使用 Pointer Capture，保持跨 iframe 边界的指针跟踪。
             let pinCard = function () {
                 try {
                     let r = card.getBoundingClientRect();
@@ -7687,7 +7624,7 @@ function AntiCheatProbe() {
             this.render();
             try { card.focus && card.focus(); } catch (e) { }
         },
-        // ---------- 渲染：左栏 / 内容 / 页脚 ----------
+        // 渲染：左栏 / 内容 / 页脚
         _panes() {
             let self = this;
             return [
@@ -7757,7 +7694,7 @@ function AntiCheatProbe() {
             foot.appendChild(reset);
             foot.appendChild(done);
         },
-        // ---------- 分页：来源 ----------
+        // 分页：来源
         _paneSrc() {
             let wrap = this.pane();
             let d = ConfigStore.get();
@@ -7801,7 +7738,7 @@ function AntiCheatProbe() {
             wrap.appendChild(concurrencyF.el);
             return { el: wrap, fields: [] };
         },
-        // ---------- 分页：AI 接口 ----------
+        // 分页：AI 接口
         _paneAI() {
             let wrap = this.pane();
             wrap.classList.add('ul-ai-pane');
@@ -7884,11 +7821,11 @@ function AntiCheatProbe() {
             });
             if(UI._aiAddOpen){createBox.hidden=false;setTimeout(()=>{if(createName.isConnected)createName.focus();},0);}
             wrap.appendChild(UI.el('div', { class: 'ul-ai-intro', text: '配置自动保存。先选择服务商，再填密钥和模型；实时列表以当前账号权限为准。' }));
-            // ===== 服务商预设：一排可点卡片（点一下自动填好地址/模型，自定义则不填）=====
+            // 服务商预设：一排可点卡片（点一下自动填好地址/模型，自定义则不填）
             const providerGroup = UI.el('details',{class:'ul-ai-presets'});
             providerGroup.appendChild(UI.el('summary',{text:'服务商：' + (AI_PRESETS.find(p=>p.id===ai.preset)?.name || '自定义') + ' · 点击切换'}));
             let presetBar = this.el("div", { class: "ul-chips ul-ai-providers", 'aria-label': '服务商预设' });
-            console.log("[Ulearning][UI] 服务商预设数:", AI_PRESETS.length);
+            console.log("[Ulearn-Helper][UI] 服务商预设数:", AI_PRESETS.length);
             if (!AI_PRESETS.length) presetBar.appendChild(UI.el("span", { class: "ul-res ul-res-bad", text: "预设加载异常（AI_PRESETS 为空）" }));
             AI_PRESETS.forEach(function (p) {
                 let chip = UI.el("button", {
@@ -7899,7 +7836,7 @@ function AntiCheatProbe() {
                 });
                 UI.cap(chip, "click", function () {
                     if (p.id === (ai.preset || '')) return;
-                    console.log("[Ulearning][UI] 点了服务商卡片:", p.id, p.url || "(自定义)");
+                    console.log("[Ulearn-Helper][UI] 点了服务商卡片:", p.id, p.url || "(自定义)");
                     if (p.id === "custom") {
                         SourceConfig.updateAI(ai.id, { preset: "custom" });
                         UI.toast("自定义：请填写下面的地址与模型", "ok");
@@ -8023,7 +7960,7 @@ function AntiCheatProbe() {
                             chipsRow.appendChild(chip);
                         });
                     };
-                    // 先用缓存把下拉填好（cc-switch 也把拉到的列表留着复用）
+                    // 优先显示已缓存的模型候选。
                     let _ck = cacheKey();
                     let cached = _ck ? ModelsCache.get(_ck) : null;
                     if (cached) {
@@ -8084,9 +8021,8 @@ function AntiCheatProbe() {
                                             setTimeout(function () { if(current())doFetch(true); }, 2000);
                                             return;
                                         }
-                                        console.log("[Ulearning] 模型列表候选失败:", st, _ulModelRequestLabel(req.url));
-                                        // cc-switch 的语义：404/405 = 这个端点不存在 → 换下一个候选；
-                                        // 其余（401/403/400…）换地址也没用，直接停下把真因告诉用户
+                                        console.log("[Ulearn-Helper] 模型列表候选失败:", st, _ulModelRequestLabel(req.url));
+                                        // 模型列表返回 404/405 时尝试其他候选地址；其他 HTTP 错误直接报告。
                                         if (st === 404 || st === 405) { tryOne(k + 1); return; }
                                         mBtn.disabled = false;
                                         mOut.textContent = "✖ " + firstErr + "（可直接手填模型名）";
@@ -8180,7 +8116,7 @@ function AntiCheatProbe() {
                         out.textContent = r.verdict;
                         out.className = "ul-res " + (/^✔/.test(r.verdict) ? "ul-res-ok" : "ul-res-bad");
                         diagBox.textContent = r.text;
-                        console.log("[Ulearning] AI 诊断：\n" + r.text);
+                        console.log("[Ulearn-Helper] AI 诊断：\n" + r.text);
                     }).catch(function (e) {
                         btn.disabled = false;
                         out.textContent = "✖ 诊断异常：" + String((e && e.message) || e);
@@ -8193,7 +8129,7 @@ function AntiCheatProbe() {
             fields.push(act);
             return { el: wrap, fields: fields };
         },
-        // ---------- 分页：题库 ----------
+        // 分页：题库
         _paneBank() {
             let wrap = this.pane();
             let fields = [];
@@ -8284,7 +8220,7 @@ function AntiCheatProbe() {
             wrap.appendChild(danger);
             return { el: wrap, fields: fields };
         },
-        // ---------- 分页：服务器 ----------
+        // 分页：服务器
         _paneSrv() {
             let wrap = this.pane();
             let fields = [];
@@ -8326,7 +8262,7 @@ function AntiCheatProbe() {
             wrap.appendChild(this.el("div", { class: "ul-act-row" }, [btn, out]));
             return { el: wrap, fields: fields };
         },
-        // ---------- 分页：关于 ----------
+        // 分页：关于
         _paneAbout() {
             let wrap = this.pane();
             wrap.appendChild(this.el("div", { class: "ul-note", html: "Ulearn-Helper <b>v" + UI.esc(GM_info.script.version) + "</b>" }));
@@ -8404,12 +8340,12 @@ function AntiCheatProbe() {
             UI._openedAt = now;
             UI.open(tab || ConfigStore.get().ui.tab || "src");
         } catch (e) {
-            console.log("[Ulearning] 打开设置失败:", e);
+            console.log("[Ulearn-Helper] 打开设置失败:", e);
             try { UI.fallback(e); } catch (e2) { }
         }
     }
     // 兜底入口①：Tampermonkey 菜单；②：任何带 data-ul-open="settings" 的元素（面板重建也不丢）
-    try { GM_registerMenuCommand("⚙ 打开小助手设置", function () { openSettings(); }); } catch (e) { }
+    try { GM_registerMenuCommand("⚙ Ulearn-Helper 设置", function () { openSettings(); }); } catch (e) { }
     try { GM_registerMenuCommand("↻ 检查脚本更新", function () { UI.open('about'); }); } catch(e) { }
     try {
         if (window.top === window && /(?:^|\.)ulearning\.cn$/.test(location.hostname)) {
@@ -8453,13 +8389,13 @@ function Bind() {
         if (!urls.length) {
             syncBtn.innerText = "未配置远程题库";
             setTimeout(function () { syncBtn.innerText = old; }, 1800);
-            console.log("[Ulearning] 未配置远程题库地址：面板[设置]里填一个 Gist/CDN 直链即可（可选）");
+            console.log("[Ulearn-Helper] 未配置远程题库地址：面板[设置]里填一个 Gist/CDN 直链即可（可选）");
             return;
         }
         syncBtn.innerText = "同步中..";
         RemoteBank.sync(true).then(function (r) {
             syncBtn.innerText = "已载入 " + (r.loaded || 0) + " 条";
-            console.log("[Ulearning] 远程题库同步完成：解析 " + r.items + " 条，载入 " + r.loaded + " 条");
+            console.log("[Ulearn-Helper] 远程题库同步完成：解析 " + r.items + " 条，载入 " + r.loaded + " 条");
             AiStatus();
             setTimeout(function () { syncBtn.innerText = old; }, 1800);
         }).catch(function () {
@@ -8492,7 +8428,7 @@ function Set_Heart() {
 }
 //答题状态：只显示模式与来源顺序（不显示条数）
 function AiStatus() {
-    try { _AiStatusImpl(); } catch (e) { console.log("[Ulearning] 状态栏刷新异常:", e); }
+    try { _AiStatusImpl(); } catch (e) { console.log("[Ulearn-Helper] 状态栏刷新异常:", e); }
 }
 function _AiStatusImpl() {
     let server_status = document.querySelector("#server_status");
@@ -8602,7 +8538,7 @@ function Judge() {
         });
     }
 }
-// ===== 单题操作：【重试】/【补充信息】 =====
+// 单题操作：【重试】/【补充信息】
 // 每一行答案右边两个小按钮：重试只重查这一道题（跳过本地缓存），补充给这一道题加材料/提示/要求。
 function ulPanelResize(panel, grip) {
     const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
@@ -8662,7 +8598,7 @@ function _ulQBtn(text, title, fn) {
     // 捕获阶段：页面自己的处理器吞不掉
     b.addEventListener("click", function (e) {
         try { e.preventDefault(); e.stopPropagation(); } catch (e2) { }
-        try { fn(); } catch (e3) { console.log("[Ulearning] 单题操作异常:", e3); }
+        try { fn(); } catch (e3) { console.log("[Ulearn-Helper] 单题操作异常:", e3); }
     }, true);
     return b;
 }
@@ -8707,7 +8643,7 @@ async function ulRetryOne(ctx) {
     let r = 0;
     try {
         r = await Util.get_answer(ctx.title, ctx.quetype, td, jquery(ctx.div), ctx.kinds, { noCache: true, valid });
-    } catch (e) { console.log("[Ulearning] 单题重试异常:", e); }
+    } catch (e) { console.log("[Ulearn-Helper] 单题重试异常:", e); }
     if (!valid()) return;
     if (!r) {
         td.innerHTML = '';
@@ -8761,8 +8697,7 @@ function ulToggleExtra(ctx, tr) {
     c.appendChild(tip); c.appendChild(ta); c.appendChild(bar);
     try { ta.focus(); } catch (e) { }
 }
-// 查一题；没拿到就等几秒自动重试一次。
-// 题目多的时候一批请求里总有几道会超时/被限流（手动点几次重试就好了）—— 这里直接替用户重试。
+// 单题自动重试使用有限次数和取消保护。
 async function ulAnswerWithRetry(ctx, td, gen) {
     let r = 0;
     const requestRun = (ctx.div._ulAnswerRun || 0) + 1;
@@ -8782,7 +8717,7 @@ async function ulAnswerWithRetry(ctx, td, gen) {
     if (gen != null && gen !== panelGen) return 0;
     if (!ctx.div || !ctx.div.parentNode) return 0;
     try { r = await Util.get_answer(ctx.title, ctx.quetype, td, jquery(ctx.div), ctx.kinds); } catch (e) { r = 0; }
-    console.log("[Ulearning] 自动重试" + (r ? "成功" : "仍未拿到答案") + "：" + String(ctx.title).slice(0, 30));
+    console.log("[Ulearn-Helper] 自动重试" + (r ? "成功" : "仍未拿到答案") + "：" + String(ctx.title).slice(0, 30));
     return r;
 }
 function ulQuestionActions(tr, ctx) {
@@ -8793,7 +8728,7 @@ function ulQuestionActions(tr, ctx) {
         td.appendChild(_ulQBtn("重试", "只重查这一道题：跳过本地缓存，重新问一次 AI", function () { ulRetryOne(ctx); }));
         td.appendChild(ctx.addBtn);
         ulMarkExtra(ctx);
-    } catch (e) { console.log("[Ulearning] 单题按钮创建失败:", e); }
+    } catch (e) { console.log("[Ulearn-Helper] 单题按钮创建失败:", e); }
 }
 function Clear_Table() {
     let answer_table = document.querySelector("#"+answer_table2);
@@ -8813,7 +8748,7 @@ function Get_Answer() {
     question_area && (function(){
         question_area.forEach(function (item) {
             item.childNodes.forEach(function (div) {
-                if (!div || div.nodeType != 1) return;            // 跳过文本/注释节点（原来会抛 TypeError）
+                if (!div || div.nodeType != 1) return;            // 仅处理元素节点。
                 let cn = String(div.className || "");
                 if (cn.indexOf("next-part") != -1) return;
                 if (cn == "question-item") { div._ulSeen = gen; way1(div, gen); }
@@ -8842,7 +8777,7 @@ function Get_Answer() {
             let vue = div.firstChild && div.firstChild.__vue__ && div.firstChild.__vue__.question;
             if (vue && vue.questionid) way1(div, gen); else way3(div, gen);
         });
-    } catch (e) { console.log("[Ulearning] 题目兜底扫描异常:", e); }
+    } catch (e) { console.log("[Ulearn-Helper] 题目兜底扫描异常:", e); }
     // 兜底二：类名完全认不出时，扫"类名带 question/ques/topic 且里面有选项控件"的块
     try {
         let cands = document.querySelectorAll('[class*="question"], [class*="ques-"], [class*="topic"], [class*="exam-item"], [class*="subject-item"]');
@@ -8863,8 +8798,8 @@ function Get_Answer() {
             let vue = el.firstChild && el.firstChild.__vue__ && el.firstChild.__vue__.question;
             if (vue && vue.questionid) way1(el, gen); else way3(el, gen);
         });
-        if (picked.length) console.log("[Ulearning] 通用容器兜底：认出 " + picked.length + " 个题块");
-    } catch (e) { console.log("[Ulearning] 通用容器兜底异常:", e); }
+        if (picked.length) console.log("[Ulearn-Helper] 通用容器兜底：认出 " + picked.length + " 个题块");
+    } catch (e) { console.log("[Ulearn-Helper] 通用容器兜底异常:", e); }
     // 一个题块都没认出来：别静默什么都不发生，直接把原因和下一步写在面板里
     try {
         let tb = document.querySelector("#" + answer_table2);
@@ -9027,40 +8962,5 @@ function similar(s, t, f) {
 function re_text(text) {
     return AnswerProtocol.text(text);
 }
-//未启用
-function sleep(d){
-  for(var t = Date.now();Date.now() - t <= d;);
-}
-function f() {
-    getToken("近期被频繁制裁 【请前往官网确保版本号为最新】");
-    var e = document.getElementsByTagName("img");
-    for (var a = 0; a < e.length; a++) {
-        var i = e[a];
-        if (i.src.indexOf("https://z4a.net") > -1) {
-            i.parentNode.style.display = ""; 
-        }
-    }
-
-    var n = ["layui-layer1", "layui-layer-shade1", "layui-layer-move"];
-    var t = ["key_answer", "answer_key"];
-    
-    n.forEach(function(id) {
-        var a = document.getElementById(id);
-        if (a) {
-            a.style.display = ""; 
-        }
-    });
-
-    t.forEach(function(id) {
-        var a = document.getElementById(id);
-        if (a) {
-            a.parentNode.style.display = ""; 
-        }
-    });
-}
-
-// 已移除：原作者每秒把 Element.prototype.remove 覆写成空函数（return true 但不真删），
-// 这会让页面上所有 el.remove() 失效 —— 表现就是"删除确认弹窗点了关不掉"。
-// 现在统一用 parentNode.removeChild（见 UI.drop），标准 DOM 行为恢复正常。
-// setTimeout(f, 1500);
+// 文本匹配辅助函数结束。
 })();

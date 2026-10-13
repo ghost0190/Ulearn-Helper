@@ -1,15 +1,15 @@
 // ==UserScript==
-// @name         🥇优学院小助手（AI版）|视频-章节测试-作业考试查题(三合一)|本地题库+AI答题
+// @name         Ulearn-Helper
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.0
-// @description  Ulearn-Helper v4.18.0：课程进度工作台；考试填写失败时由 AI 有限操作题目控件；GitHub 自动更新与 AI 接口管理。
+// @version      4.18.1
+// @description  Ulearn-Helper v4.18.1：统一安装名称、菜单、日志与代码注释；学习进度工作台、AI 答题与 GitHub 自动更新。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js
-// @author       Miss. / AI-patch
+// @author       Miss. (original) / ghost0190 (maintenance)
 // @match        https://utest.ulearning.cn/*
 // @match        https://*.ulearning.cn/*/homework.do*
 // @match        https://homework.ulearning.cn/*

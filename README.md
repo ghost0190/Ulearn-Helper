@@ -1,11 +1,11 @@
 # Ulearn-Helper
 
-优学院 Tampermonkey 脚本，当前版本 **4.18.0**。
+优学院 Tampermonkey 脚本，当前版本 **4.18.1**。
 
 ## 安装与更新
 
 1. 在 Edge/Chrome 安装 Tampermonkey 并允许用户脚本运行。
-2. [安装 Ulearn-Helper](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js)。已有本地版本选择“更新”，原安装名称和 namespace 保留以沿用配置。
+2. [安装 Ulearn-Helper](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js)。已有版本请在 Tampermonkey 管理面板中对原脚本执行“检查更新”。4.18.1 将安装名称统一为 Ulearn-Helper；在原脚本记录上更新可保留已有配置。改名时直接打开安装链接可能产生第二份脚本。
 3. 刷新课程或考试页面加载新版。
 
 Tampermonkey 根据脚本的 updateURL 与 downloadURL 自动检测和安装更新；检查频率及自动更新开关由扩展设置决定。脚本启动时最多每 6 小时获取一次版本元数据，失败后 30 分钟可再试；发现新版会在悬浮窗版本按钮提示，点击进入安装页。设置 → 关于可手动检查、关闭启动检查及打开仓库。启动检查不直接替换运行中的脚本。
@@ -22,10 +22,10 @@ Tampermonkey 根据脚本的 updateURL 与 downloadURL 自动检测和安装更�
 
 ## 维护发布
 
-默认发布分支为 main。修改 Ulearn-Helper.user.js 并递增 @version；将其完整元数据头同步到 Ulearn-Helper.meta.js，然后把两个文件在同一提交中发布。保留 @name 与 @namespace，确保原安装和存储延续。发布前执行 node --check Ulearn-Helper.user.js 并验证两个文件的 @version 一致。
+默认发布分支为 main。修改 Ulearn-Helper.user.js 并递增 @version；将其完整元数据头同步到 Ulearn-Helper.meta.js，然后把两个文件在同一提交中发布。安装名称统一为 Ulearn-Helper；保持 @namespace 和下载地址稳定。涉及改名时，通过原脚本记录更新，并核对配置是否沿用。发布前执行 node --check Ulearn-Helper.user.js 并验证两个文件的 @version 一致。
 
 后续版本必须同步更新脚本和元数据，不能只修改仓库标签。用户更新周期取决于扩展设置、缓存与网络；不会即时强制更新。
 
 ## 来源
 
-保留原脚本 Miss. 作者标识及安装标识，UI 品牌为 Ulearn-Helper。本仓库暂未添加新的开源许可证；不改写原有代码权属声明。
+安装名称、界面和日志品牌统一为 Ulearn-Helper，保留 Miss. 的原作者署名。本仓库暂未添加新的开源许可证；不改写原有代码权属声明。
