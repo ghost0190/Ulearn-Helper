@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.1
-// @description  Ulearn-Helper v4.18.1：统一安装名称、菜单、日志与代码注释；学习进度工作台、AI 答题与 GitHub 自动更新。
+// @version      4.18.2
+// @description  Ulearn-Helper v4.18.2：修复配置权限、XHR 生命周期、配置并发、题库身份与 AI 请求解析。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -25,6 +25,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @grant        GM_setValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_listValues
 // @grant        GM_getValue
 // @connect      api.deepseek.com
 // @connect      *

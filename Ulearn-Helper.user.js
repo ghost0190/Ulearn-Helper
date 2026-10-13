@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.1
-// @description  Ulearn-Helper v4.18.1：统一安装名称、菜单、日志与代码注释；学习进度工作台、AI 答题与 GitHub 自动更新。
+// @version      4.18.2
+// @description  Ulearn-Helper v4.18.2：修复配置权限、XHR 生命周期、配置并发、题库身份与 AI 请求解析。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -25,6 +25,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @grant        GM_setValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_listValues
 // @grant        GM_getValue
 // @connect      api.deepseek.com
 // @connect      *
@@ -130,12 +132,13 @@
         }
         let fix = apiHostFix(s);
         if (fix) { console.log("[Ulearn-Helper] 这是控制台/网页地址，已换成接口地址：" + fix); s = fix; }
-        s = s.replace(/\/+$/, "");
-        if (/\/chat\/completions$/i.test(s)) return s;
-        if (/^https?:\/\/api\.deepseek\.com$/i.test(s)) return s + "/chat/completions";
-        if (/\/v\d+$/i.test(s)) return s + "/chat/completions";   // 形如 .../api/paas/v4、.../v1 都要补全
-        if (!/\/v\d/i.test(s)) s += "/v1/chat/completions";
-        return s;
+        const match = s.match(/^([^?#]*)(\?[^#]*)?(#.*)?$/);
+        let path = match[1].replace(/\/+$/, ''), query = match[2] || '', hash = match[3] || '';
+        if (!/\/chat\/completions$/i.test(path)) {
+            if (/^https?:\/\/api\.deepseek\.com$/i.test(path) || /\/v\d+$/i.test(path)) path += '/chat/completions';
+            else if (!/\/v\d/i.test(path)) path += '/v1/chat/completions';
+        }
+        return path + query + hash;
     };
     const AI_CONFIG_DEFAULT = {
         enabled: true,
@@ -371,18 +374,22 @@
         let headers = {};
         if (auth === "bearer") headers["Authorization"] = "Bearer " + key;
         else if (auth === "header") headers[an || "api-key"] = key;
-        else if (auth === "query" && key) url += (url.indexOf("?") === -1 ? "?" : "&") + encodeURIComponent(an || "key") + "=" + encodeURIComponent(key);
+        else if (auth === "query" && key) {
+            const i = url.indexOf('#'), fragment = i < 0 ? '' : url.slice(i);
+            const base = i < 0 ? url : url.slice(0, i);
+            url = base + (base.indexOf('?') === -1 ? '?' : '&') + encodeURIComponent(an || 'key') + '=' + encodeURIComponent(key) + fragment;
+        }
         return { url: url, headers: headers };
     };
     // 去掉 /chat/completions 得到服务根地址（GET {base}/models 用）
     const apiBaseOf = function (u) {
         let s = normalizeApiUrl(u);
-        return s.replace(/\/chat\/completions\/?$/i, "");
+        return s.replace(/\/chat\/completions\/?(?=[?#]|$)/i, "");
     };
     const buildModelsRequest = function (cfg) {
         let base = apiBaseOf((cfg && cfg.api_url) || "");
         if (!base) return { ok: false, url: "", headers: {} };
-        let a = aiAuth(cfg, base + "/models");
+        let a = aiAuth(cfg, base.replace(/^([^?#]*)(.*)$/, "$1/models$2"));
         return { ok: true, url: a.url, headers: a.headers };
     };
     // 模型列表：探测候选地址、缓存结果，并在读取失败时使用预设候选。参考 cc-switch。
@@ -585,11 +592,12 @@
             }
             let raw = normalizeApiUrl((cfg && cfg.api_url) || "");
             if (!raw) return out;
-            let base = raw.replace(/\/chat\/completions\/?$/i, "").replace(/\/+$/, "");
+            let suffix = raw.match(/[?#].*$/); suffix = suffix ? suffix[0] : "";
+            let base = raw.replace(/[?#].*$/, "").replace(/\/chat\/completions\/?$/i, "").replace(/\/+$/, "");
             let push = function (u, why) {
                 if (!u || seen[u]) return;
                 seen[u] = 1;
-                let a = aiAuth(cfg, u);
+                let a = aiAuth(cfg, u + suffix);
                 out.push({ url: a.url, headers: withUA(cfg, a.headers), why: why || "" });
             };
             // base 里出现 /v1/（用户直接粘了完整端点，如 .../api/anthropic/v1/messages）→ 截到 /v1/ 之前
@@ -990,8 +998,44 @@
         return d;
     };
     // 状态层：唯一写入口
+    // Field journal makes independent writes durable even when tabs save concurrently.
+    const configClone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+    const configEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const configDiff = function (before, after, path, out) {
+        path = path || []; out = out || [];
+        if (configEqual(before, after)) return out;
+        if (path.length === 1 && path[0] === 'ais' && Array.isArray(before) && Array.isArray(after)) {
+            const old = new Map(before.map(a => [a.id, a])), next = new Map(after.map(a => [a.id, a]));
+            new Set([...old.keys(), ...next.keys()]).forEach(id => configDiff(old.get(id), next.get(id), path.concat('@' + id), out));
+        } else if (before && after && !Array.isArray(before) && !Array.isArray(after) && typeof before === 'object' && typeof after === 'object') {
+            new Set([...Object.keys(before), ...Object.keys(after)]).forEach(key => {
+                if (!['__proto__', 'prototype', 'constructor'].includes(key)) configDiff(before[key], after[key], path.concat(key), out);
+            });
+        } else out.push({ path, remove: after === undefined, value: configClone(after) });
+        return out;
+    };
+    const configApply = function (doc, change) {
+        const path = change.path;
+        if (!Array.isArray(path) || !path.length || path.some(x => typeof x !== 'string' || ['__proto__', 'prototype', 'constructor'].includes(x))) return;
+        let cur = doc;
+        for (let i = 0; i < path.length - 1; i++) {
+            const key = path[i];
+            if (Array.isArray(cur) && key[0] === '@') {
+                cur = cur.find(a => a.id === key.slice(1)); if (!cur) return;
+            } else { if (!cur[key] || typeof cur[key] !== 'object') cur[key] = {}; cur = cur[key]; }
+        }
+        const key = path[path.length - 1];
+        if (Array.isArray(cur) && key[0] === '@') {
+            const at = cur.findIndex(a => a.id === key.slice(1));
+            if (change.remove) { if (at >= 0) cur.splice(at, 1); }
+            else if (at >= 0) cur[at] = configClone(change.value); else cur.push(configClone(change.value));
+        } else if (change.remove) delete cur[key]; else cur[key] = configClone(change.value);
+    };
     const ConfigStore = {
         _doc: null,
+        _base: null,
+        _clock: 0,
+        _writer: Date.now().toString(36) + Math.random().toString(36).slice(2),
         _subs: [],
         _undo: [],
         _readLegacy() {
@@ -1006,19 +1050,43 @@
             });
             return legacy;
         },
+        _readStored() {
+            let raw = null;
+            try { raw = JSON.parse(GM_getValue(UL_CONFIG_KEY, '') || 'null'); } catch (e) { }
+            let doc = raw && raw.v === 3 ? raw : migrateConfig(this._readLegacy(), AI_DEFAULTS);
+            if (typeof GM_listValues === 'function') {
+                const changes = [];
+                for (const key of GM_listValues()) {
+                    if (!key.startsWith(UL_CONFIG_KEY + ':field:')) continue;
+                    try { const op = JSON.parse(GM_getValue(key, 'null')); if (op && Number.isSafeInteger(op.clock)) changes.push(op); } catch (e) { }
+                }
+                changes.sort((a, b) => a.clock - b.clock || String(a.writer).localeCompare(String(b.writer)));
+                for (const op of changes) { this._clock = Math.max(this._clock, op.clock); configApply(doc, op); }
+            }
+            return normalizeConfig(doc, AI_DEFAULTS, SOURCE_META);
+        },
         get() {
-            if (!this._doc) {
-                let raw = null;
-                try { raw = JSON.parse(GM_getValue(UL_CONFIG_KEY, "") || "null"); } catch (e) { }
-                if (raw && raw.v === 3) this._doc = normalizeConfig(raw, AI_DEFAULTS, SOURCE_META);
-                else this._doc = normalizeConfig(migrateConfig(this._readLegacy(), AI_DEFAULTS), AI_DEFAULTS, SOURCE_META);
+            if (!this._doc) { this._doc = this._readStored(); this._base = configClone(this._doc); }
+            else if (configEqual(this._doc, this._base)) {
+                this._doc = this._readStored(); this._base = configClone(this._doc);
             }
             return this._doc;
         },
         save(silent) {
-            try { GM_setValue(UL_CONFIG_KEY, JSON.stringify(this._doc)); } catch (e) { }
-            // 兼容：把第一个 AI 同步回旧键（老版本脚本仍可读）
-            try { GM_setValue("ai_config", JSON.stringify(this._doc.ais[0])); } catch (e) { }
+            const local = configClone(this._doc), changes = configDiff(this._base || {}, local);
+            let current = this._readStored();
+            for (const op of changes) {
+                configApply(current, op);
+                if (typeof GM_listValues === 'function') {
+                    op.clock = ++this._clock; op.writer = this._writer;
+                    GM_setValue(UL_CONFIG_KEY + ':field:' + JSON.stringify(op.path), JSON.stringify(op));
+                }
+            }
+            this._doc = normalizeConfig(current, AI_DEFAULTS, SOURCE_META);
+            this._base = configClone(this._doc);
+            const undo = this._undo[this._undo.length - 1];
+            if (undo && !undo.after) undo.after = local;
+            GM_setValue(UL_CONFIG_KEY, JSON.stringify(this._doc));
             if (!silent) this._emit();
         },
         _emit() {
@@ -1027,7 +1095,7 @@
         subscribe(fn) { this._subs.push(fn); return fn; },
         _snapshot() {
             try {
-                this._undo.push(JSON.stringify(this.get()));
+                this._undo.push({ before: configClone(this.get()), after: null });
                 while (this._undo.length > 20) this._undo.shift();
             } catch (e) { }
         },
@@ -1035,28 +1103,41 @@
         patch(path, value, opts) {
             let parts = String(path).split('.');
             if (!parts.length || parts.some(k => !k || ['__proto__', 'prototype', 'constructor'].includes(k))) return false;
-            if (!opts || !opts.noUndo) this._snapshot();
-            let d = this.get();
-            let cur = d;
+            if (!this._doc) this.get();
+            const wanted = configClone(this._doc);
+            let cur = wanted;
             for (let i = 0; i < parts.length - 1; i++) {
-                let k = parts[i];
-                if (cur[k] == null || typeof cur[k] != "object") cur[k] = /^\d+$/.test(parts[i + 1]) ? [] : {};
-                cur = cur[k];
+                const key = parts[i];
+                if (cur[key] == null || typeof cur[key] !== 'object') cur[key] = /^\d+$/.test(parts[i + 1]) ? [] : {};
+                cur = cur[key];
             }
             cur[parts[parts.length - 1]] = value;
-            this.save();
-            return true;
+            const changes = configDiff(this._doc, wanted);
+            if (!opts || !opts.noUndo) this._snapshot(); else this.get();
+            for (const change of changes) configApply(this._doc, change);
+            this.save(); return true;
         },
         recalc() { this._doc = normalizeConfig(this.get(), AI_DEFAULTS, SOURCE_META); this.save(); },
         replaceDoc(next) {
-            const normalized = normalizeConfig(next, AI_DEFAULTS, SOURCE_META);
-            this._snapshot(); this._doc = normalized; this.save();
-            return this._doc;
+            if (!this._doc) this.get();
+            const changes = configDiff(this._doc, normalizeConfig(next, AI_DEFAULTS, SOURCE_META));
+            this._snapshot();
+            for (const change of changes) configApply(this._doc, change);
+            this.save(); return this._doc;
         },
         undo() {
             if (!this._undo.length) return false;
-            try { this._doc = normalizeConfig(JSON.parse(this._undo.pop()), AI_DEFAULTS, SOURCE_META); this.save(); return true; }
-            catch (e) { return false; }
+            const op = this._undo.pop();
+            this._doc = this._readStored(); this._base = configClone(this._doc);
+            const read = function (doc, path) {
+                let cur = doc;
+                for (const key of path) { if (!cur) return undefined; cur = Array.isArray(cur) && key[0] === '@' ? cur.find(a => a.id === key.slice(1)) : cur[key]; }
+                return cur;
+            };
+            for (const change of configDiff(op.after || this._doc, op.before)) {
+                if (configEqual(read(this._doc, change.path), read(op.after, change.path))) configApply(this._doc, change);
+            }
+            this.save(); return true;
         },
         canUndo() { return this._undo.length > 0; },
         resetPane(pane) {
@@ -1082,6 +1163,13 @@
             return true;
         }
     };
+
+    if (typeof GM_addValueChangeListener === 'function') {
+        GM_addValueChangeListener(UL_CONFIG_KEY, function (key, oldValue, newValue, remote) {
+            if (!remote || !ConfigStore._doc || !configEqual(ConfigStore._doc, ConfigStore._base)) return;
+            ConfigStore._doc = ConfigStore._readStored(); ConfigStore._base = configClone(ConfigStore._doc); ConfigStore._emit();
+        });
+    }
 
 
     const SourceConfig = {
@@ -1691,7 +1779,7 @@
                 if (Array.isArray(list)) {
                     for (let i = 0; i < list.length; i++) {
                         let it = list[i] || {};
-                        if (it.title && it.answer != null && String(it.answer).trim()) {
+                        if (!it.legacyUnknown && it.multiple !== -1 && it.title && it.answer != null && String(it.answer).trim()) {
                             out.push({ title: it.title, answer: it.answer, options: it.options, material: it.material, extra: it.extra, blanks: it.blanks, kind: it.kind, quetype: it.quetype, typeName: it.typeName, multiple: it.multiple });
                         }
                     }
@@ -1922,11 +2010,7 @@
             } else {
                 bank.map[k] = { t: title, tn: this.norm(title), a: answer, s: source || "ai", ts: Date.now(), o: (options || []).slice(0, 20), m: re_text(info && info.material || ""), e: re_text(info && info.extra || ""), bl: AnswerProtocol.question(info).blanks, k: AnswerProtocol.kind(info && (info.typeName || info.quetype), [], info && (info.kind || info.k)), mu: !!(info && (info.multiple || info.mu || /多选|^2$/.test(String(info.typeName || info.quetype || '')))) };
             }
-            let keys = Object.keys(bank.map);
-            if (keys.length > this.MAX) {
-                keys.sort((a, b) => (bank.map[a].ts || 0) - (bank.map[b].ts || 0));
-                for (let i = 0; i < keys.length - this.MAX; i++) delete bank.map[keys[i]];
-            }
+            this._prune(bank);
             this._save(bank);
         },
         // 导出本地题库（格式与后端 /admin/export 一致，可直接互相导入）
@@ -1945,6 +2029,11 @@
             let list = RemoteBank.parse(payload);
             return RemoteBank.merge(list, "导入");
         },
+        _prune(bank) {
+            const keys = Object.keys(bank.map);
+            keys.sort((a, b) => Number(!!bank.map[a].a) - Number(!!bank.map[b].a) || (bank.map[a].ts || 0) - (bank.map[b].ts || 0));
+            for (let i = 0; i < keys.length - this.MAX; i++) delete bank.map[keys[i]];
+        },
         markPending(title, quetype, cont) {            if (!title) return;
             let bank = this._load();
             let k = this.key(title, []);
@@ -1954,6 +2043,7 @@
                 tn: this.norm(title), a: "", s: "pending",
                 q: quetype || "", c: String(cont || "").slice(0, 1000), ts: Date.now()
             };
+            this._prune(bank);
             this._save(bank);
         },
         // 从 getCorrectAnswer 等接口响应里尽力收录答案
@@ -1979,7 +2069,14 @@
                     if (node[ansKeys[i]] != null) answer = Bank._normalizeAnswer(node[ansKeys[i]]);
                 }
                 if (title && answer) {
-                    Bank.save(title, answer, "paper", []);
+                    let options = node.options || node.optionList || node.questionOptions || [];
+                    if (!Array.isArray(options)) options = typeof options === 'string' ? options.split('||') : [];
+                    options = options.map(x => re_text(Bank._normalizeAnswer(x))).filter(Boolean);
+                    const info = Object.assign({}, node, { quetype: node.type || node.quetype, options });
+                    info.kind = AnswerProtocol.kind(info.quetype, options, node.kind);
+                    const parsed = AnswerProtocol.parse(answer, Object.assign({}, info, { title }));
+                    if (!parsed) continue;
+                    Bank.save(title, parsed, "paper", options, info);
                     saved++;
                 }
                 for (let key in node) {
@@ -2567,7 +2664,7 @@
                 try {
                     let plan = SourceConfig.plan() || [];
                     for (let i = 0; i < plan.length; i++) {
-                        if (String(plan[i]).indexOf("ai:") !== 0) continue;
+                        if (String(plan[i]).indexOf("ai:") !== 0) return 0; // 优先题库必须由逐题流程先查询。
                         let a = SourceConfig.aiOf(plan[i]);
                         if (a && SourceConfig.aiReady(a)) { ai = a; break; }
                     }
@@ -2655,9 +2752,9 @@
                 else if (ok2) v = "✔ 接口本身完全正常（地址/Key/模型都对）—— 刚才被拦是「请求太密」或「网络出口被风控」，不是配置问题。已自动串行限速，可在【来源】页把间隔调大。";
                 else if (waf2 && waf1) v = "✖ 连 /models 都被拦 → 服务商在边缘按 IP 拦了你的网络出口（VPN/代理、机房 IP、校园网共享出口被刷爆都可能）。换网络或换服务商。";
                 else if (waf2) v = "✖ 只有对话接口被拦（/models 正常）→ 突发频率触发了风控。已自动串行限速，可把间隔调到 2000 毫秒以上。";
-                else if (!isErr(r2) && (r2.st === 401 || r2.st === 403)) v = "✖ Key 无效 / 无权限（HTTP " + r2.st + "）。";
-                else if (!isErr(r2) && r2.st === 429) v = "✖ 限流或额度用尽（429）。等一会儿或充值；也可换一家。";
-                else if (!isErr(r2)) v = "✖ 服务商返回 HTTP " + r2.st + "，看 ② 的说明。";
+                else if ((r2.st === 401 || r2.st === 403)) v = "✖ Key 无效 / 无权限（HTTP " + r2.st + "）。";
+                else if (r2.st === 429) v = "✖ 限流或额度用尽（429）。等一会儿或充值；也可换一家。";
+                else if (r2.st > 0) v = "✖ 服务商返回 HTTP " + r2.st + "，看 ② 的说明。";
                 else v = "✖ 请求没发出去：" + (r2.err || "未知原因") + "（多为网络/扩展拦截）。";
                 L.push("结论：" + v);
                 return { text: L.join("\n"), verdict: v };
@@ -5429,108 +5526,10 @@ function Init() {
             if (tbl && window.MutationObserver) new MutationObserver(syncEmpty).observe(tbl, { childList: true, subtree: true });
             syncEmpty();
         } catch (e) { }
-        // 控制台自检钩子：__ul.copy("测试") 验证剪贴板；__ul.panel 是悬浮窗节点
-        // __ul.server.get() 服务器配置；__ul.normalize() 地址归一化；__ul.bank/ai/remote 题库与AI配置
-        try {
-            $w.__ul = {
-                copy: Util.copy, version: GM_info.script.version, panel: div,
-                server: ServerConfig, normalize: normalizeBase,
-                bank: Bank, ai: AIConfig, remote: RemoteBank, presets: AI_PRESETS, status: AiStatus,
-                source: SourceConfig, apiNormalize: normalizeApiUrl, exportJSON: function () { return Bank.exportJSON(); },
-                aiAuth: aiAuth, models: buildModelsRequest, parseModels: parseModelList,
-                modelsAll: modelsCandidates, modelPresets: MODEL_PRESETS, modelsCache: ModelsCache,
-                fallbackModels: fallbackModels, modelsByHost: MODEL_PRESETS_BY_HOST,
-                compatSuffixes: COMPAT_SUFFIXES,
-                httpError: friendlyHttpError, stripHtml: stripHtmlText, isHtml: isHtmlBody,
-                parseAI: parseAIResponse, isErrorPage: looksLikeErrorPage, isJunk: isJunkAnswer, purgeJunk: function () { return Bank.purgeJunk(); },
-                diag: function (id) { return Util.aiDiag(id ? SourceConfig.aiOf(id.indexOf("ai:") === 0 ? id : "ai:" + id) : null); },
-                gap: function () { return _aiGapMs(); },
-                hostFix: apiHostFix,
-                batch: function () { return Util.batchPrefetch(); }, readQ: function (div, kinds) { return Util._read_question(div, kinds); },
-                collect: function () { return Util._collectQuestions(); }, parseBatch: function (r, n) { return Util._parseBatch(r, n); },
-                batchPrompt: function (l) { return Util._batchPrompt(l); }, prompt: function (q, o, k, t, x, c) { return Util._build_prompt(q, o, k, t, x, c); },
-                kindOf: function (t, o) { return Util._detect_kind(t, o, null); },
-                parseAIAnswer: function (raw, o, k, t) { return Util.parse_ai(raw, o, k, t); },
-                judgeOf: function (s) { return Util._judgeOf(s); }, cleanAnswer: function (s) { return Util._cleanAnswer(s); },
-                report: function () { return (NoReport.log || []).slice(-20); },
-                classify: function (u) { return NoReport.classify ? NoReport.classify(u) : null; },
-                materialOf: function ($d) { return Util._materialOf($d); },
-                practice: function () { return { questions: _ulPracticeQuestions().length, pageId: _ulPageId(), busy: _ulPracticeBusy }; },
-                video: function () {
-                    let nodes = _ulVideoNodes();
-                    let iframes = 0, native = 0;
-                    try { iframes = document.querySelectorAll("iframe").length; } catch (e) { }
-                    try { native = jquery("video").length; } catch (e) { }
-                    return {
-                        videos: nodes.length, rate: _ulVideoRate(),
-                        running: !!youxueyuan.timer, started: !!youxueyuan._inited,
-                        fileMedia: jquery(".file-media").length, nativeVideo: native, iframes: iframes
-                    };
-                },
-                study: function (go) { if (go === false) youxueyuan.stop(); else youxueyuan.start(false); return "ok"; },
-                nextPage: function (why) { return _ulNextPage(why || "手动", true); },
-                resume: function () { let $v = _ulVideoNodes(); return $v.length ? _ulResumeVideo($v, 0) : "no video"; },
-                playErr: function () { return _ulPlayErr || "(无)"; },
-                pauses: function () { return _ulPauseLog.slice(-10); },
-                watchdog: function () { try { _ulVideoWatchdog(); return "已执行一轮看门狗"; } catch (e) { return String(e); } },
-                course: function () { _ulCourseCache = { t: 0, v: null }; let c = _ulCourseStat(); return { stat: c, text: _ulCourseText() }; },
-                videoSave: function () {
-                    const state = _ulVideoSaveState;
-                    return state ? { phase: state.phase, attempts: state.attempts, retryIn: Math.max(0, state.retryAt - Date.now()) } : { phase: 'idle' };
-                },
-                videoDirect: function () {
-                    const state = _ulVideoDirectState;
-                    return { enabled: _ulDirectVideoEnabled(), phase: state ? state.phase : 'idle', reason: state ? state.reason : '', attempts:state ? state.attempts : 0,
-                        background:!!(state && state.background), retryIn:state ? Math.max(0, state.retryAt-Date.now()) : 0 };
-                },
-                videoProgress: function () {
-                    let $v = _ulVideoNodes();
-                    let out = [];
-                    for (let i = 0; i < $v.length; i++) {
-                        let p = _ulVideoProgress($v, i);
-                        out.push({
-                            i: i, tag: p.v ? String(p.v.tagName).toLowerCase() : "(找不到 video)",
-                            duration: Math.round(p.d), current: Math.round(p.c),
-                            paused: p.v ? !!p.v.paused : null,
-                            rate: p.v ? (Math.round((Number(p.v.playbackRate) || 1) * 100) / 100) : null,
-                            wantRate: _ulVideoRate(),
-                            ended: p.ended, done: _ulVideoDone($v, i)
-                        });
-                    }
-                    return out;
-                },
-                panelMode: function () {
-                    let p = document.querySelector(".ul-panel");
-                    if (!p) return "no panel";
-                    _ulSyncPanelMode();
-                    return p.className;
-                },
-                collapse: function (v) {
-                    let p = document.querySelector(".ul-panel");
-                    if (!p) return "no panel";
-                    if (v === false) p.classList.remove("ul-collapsed"); else p.classList.add("ul-collapsed");
-                    return p.className;
-                },
-                videoTick: function () { _ulVideoTick(); return "已执行一轮刷课"; },
-                answerIndexes: function (a, n) { return Util._answerIndexes(a, n); },
-                examPage: function (u, h) { return _isExamLikePage(u, h); },
-                fullscreen: function () { return KillAntiCheat.KILL_FULLSCREEN; },
-                qextra: QExtra, retryOne: function (ctx) { return ulRetryOne(ctx); },
-                chunk: function (l, q, n) { return Util._chunkQuestions(l, q, n); },
-                show: function () { Init(); try { let p = document.querySelector(".ul-panel"); if (p) p.style.display = "block"; } catch (e) { } return "悬浮窗已重建"; },
-                page: function () {
-                    let q = function (sel) { try { return document.querySelectorAll(sel).length; } catch (e) { return -1; } };
-                    return {
-                        url: location.href, top: window.top === window.self,
-                        panel: !!document.getElementById(answer_table2),
-                        question_area: q(".question-area"), questions: q(".questions"),
-                        question_item: q(".question-item"), choice_list: q(".choice-list"),
-                        textarea: q("textarea"), richtext: q(".rich-text"),
-                        body: document.body ? document.body.children.length : 0
-                    };
-                }
-            };
-        } catch (e) { }
+        // 页面只获得不含配置、函数和节点引用的只读版本信息。
+        try { Object.defineProperty($w, '__ul', { configurable: true, value: Object.freeze({ version: GM_info.script.version }) }); } catch (e) { }
+        /* TEST_INIT_HOOK */
+
     }
     try { _ulSyncPanelMode(); } catch (e) {}
     try { AiStatus(); } catch (e) { console.log("[Ulearn-Helper] 状态栏刷新异常:", e); }
@@ -6031,16 +6030,43 @@ function NoReport() {
                     } catch (e) { }
                 } catch (e) { }
             };
+            const synthetic = new WeakMap(), epochs = new WeakMap();
+            const oa = XHR.prototype.abort;
+            const reset = function (xhr) {
+                const state = synthetic.get(xhr);
+                if (state) { state.cancelled = true; clearTimeout(state.timer); synthetic.delete(xhr); }
+                ['responseText', 'response', 'readyState', 'status', 'statusText', 'responseURL'].forEach(function (key) { try { delete xhr[key]; } catch (e) { } });
+                xhr.__ulClean = false;
+            };
+            const fire = (xhr, name) => xhr.dispatchEvent(new Event(name));
             XHR.prototype.open = function (m, u) {
-                this.__m = String(m || '').toUpperCase();
-                this.__u = String(u || '');
-                try { delete this.responseText; } catch (e) { }   // 实例复用：清掉上一次钉上去的 getter
-                this.__ulClean = false;
+                reset(this); epochs.set(this, (epochs.get(this) || 0) + 1);
+                this.__m = String(m || '').toUpperCase(); this.__u = String(u || ''); this.__async = arguments[2] !== false;
                 return oo.apply(this, arguments);
+            };
+            if (oa) XHR.prototype.abort = function () {
+                const state = synthetic.get(this);
+                if (!state) return oa.apply(this, arguments);
+                const pending = !state.done, epoch = epochs.get(this);
+                reset(this); const result = oa.apply(this, arguments);
+                Object.defineProperty(this, 'readyState', { configurable: true, value: pending ? 4 : 0 });
+                if (pending) { fire(this, 'readystatechange'); fire(this, 'abort'); fire(this, 'loadend'); }
+                if (epochs.get(this) === epoch) Object.defineProperty(this, 'readyState', { configurable: true, value: 0 });
+                return result;
+            };
+            const ogr = XHR.prototype.getResponseHeader, ogar = XHR.prototype.getAllResponseHeaders;
+            if (ogr) XHR.prototype.getResponseHeader = function (name) {
+                const state = synthetic.get(this);
+                return state ? (state.done && String(name).toLowerCase() === 'content-type' ? 'application/json' : null) : ogr.apply(this, arguments);
+            };
+            if (ogar) XHR.prototype.getAllResponseHeaders = function () {
+                const state = synthetic.get(this);
+                return state ? (state.done ? 'content-type: application/json\r\n' : '') : ogar.apply(this, arguments);
             };
             if (oss) {
                 XHR.prototype.send = function (body) {
                     let nb = null;
+                    if (synthetic.has(this) || (typeof this.readyState === 'number' && this.readyState !== 1)) throw new DOMException('Invalid XHR state', 'InvalidStateError');
                     try {
                         // 防误吞：答题/交卷接口即使带 leaveTime 字段也必须放行（record 这类宽泛词已剔除）
                         let isAnswerApi = /(submit|saveanswer|answer|paper)/i.test(this.__u);
@@ -6048,21 +6074,30 @@ function NoReport() {
                         if (this.__m == 'POST' && !isBehavior && (R.test(this.__u) || (body && String(body).indexOf('leaveTime') != -1 && !isAnswerApi))) {
                             _rep('拦截', this.__m, this.__u);
                             console.log("[Ulearn-Helper] 已拦截离开上报 POST:", this.__u);
-                            // 不能静默 return（调用方会永远等不到完成）→ 伪造一个 200 完成
+                            const xhr = this, state = { done: false, cancelled: false, timer: null };
+                            const text = '{"code":1}', type = xhr.responseType || '';
+                            synthetic.set(xhr, state);
                             try {
-                                Object.defineProperty(this, 'responseText', { configurable: true, get: function () { return '{"code":1}'; } });
-                                Object.defineProperty(this, 'response', { configurable: true, get: function () { return '{"code":1}'; } });
-                                this.readyState = 4;
-                                this.status = 200;
-                                this.statusText = 'OK';
-                                let self = this;
-                                setTimeout(function () {
-                                    try { self.dispatchEvent(new Event('readystatechange')); } catch (e) { }
-                                    try { self.dispatchEvent(new Event('load')); } catch (e) { }
-                                    try { if (typeof self.onload == 'function') self.onload.call(self, new Event('load')); } catch (e) { }
-                                    try { if (typeof self.onreadystatechange == 'function') self.onreadystatechange.call(self); } catch (e) { }
-                                }, 0);
-                            } catch (e) { }
+                                const read = {
+                                    readyState: () => state.done ? 4 : 1, status: () => state.done ? 200 : 0,
+                                    statusText: () => state.done ? 'OK' : '', responseURL: () => state.done ? xhr.__u : '',
+                                    responseText: () => { if (type && type !== 'text') throw new DOMException('Invalid responseType', 'InvalidStateError'); return state.done ? text : ''; },
+                                    response: () => !state.done ? (type && type !== 'text' ? null : '') : type === 'json' ? {code:1} : type === 'blob' ? new Blob([text], {type:'application/json'}) : type === 'arraybuffer' ? new TextEncoder().encode(text).buffer : type === 'document' ? null : text
+                                };
+                                Object.keys(read).forEach(key => Object.defineProperty(xhr, key, { configurable: true, get: read[key] }));
+                                const complete = function () {
+                                    if (state.cancelled || synthetic.get(xhr) !== state) return;
+                                    state.done = true; fire(xhr, 'readystatechange');
+                                    if (state.cancelled) return;
+                                    fire(xhr, 'load'); if (!state.cancelled) fire(xhr, 'loadend');
+                                };
+                                fire(xhr, 'loadstart');
+                                if (!state.cancelled) { if (xhr.__async) state.timer = setTimeout(complete, 0); else complete(); }
+                            } catch (e) {
+                                reset(xhr);
+                                if (oa) oa.call(xhr);
+                                setTimeout(function () { fire(xhr, 'error'); fire(xhr, 'loadend'); }, 0);
+                            }
                             return;
                         }
                         // 放行的 POST 也要清字段：交卷/答题/学习进度请求保留，离开计数归零
@@ -7228,15 +7263,21 @@ function AntiCheatProbe() {
                 UI.cap(ctl, "blur", function () { if (check()) commit(ctl.value); });
                 if (f.type === "json") UI.cap(ctl, "input", check);
             } else if (f.type === "secret") {
-                ctl = this.el("input", { type: "password", class: "ul-inp", placeholder: f.placeholder || "" });
-                ctl.value = val == null ? "" : String(val);
-                let eye = UI.el("button", { type: "button", class: "ul-eye", title: "显示/隐藏", text: "显示", "aria-label": "显示密钥", "aria-pressed": "false" });
-                ctl.autocomplete = 'off'; ctl.spellcheck = false;
-                UI.cap(eye, "click", function () { const reveal = ctl.type === 'password'; ctl.type = reveal ? 'text' : 'password'; eye.textContent = reveal ? '隐藏' : '显示'; eye.setAttribute('aria-label', reveal ? '隐藏密钥' : '显示密钥'); eye.setAttribute('aria-pressed', String(reveal)); });
-                let doCommit = UI.debounce(function () { commit(ctl.value); }, 500);
-                UI.cap(ctl, "input", doCommit);
-                UI.cap(ctl, "blur", function () { commit(ctl.value); });
-                wrap.appendChild(this.el("div", { class: "ul-inp-row" }, [ctl, eye]));
+                ctl = this.el("input", { type: "password", class: "ul-inp", placeholder: val ? "已保存；输入新值替换" : (f.placeholder || "") });
+                ctl.value = "";
+                ctl.autocomplete = 'new-password'; ctl.spellcheck = false;
+                let dirty = false;
+                const persist = function () {
+                    if (!dirty) return;
+                    dirty = false; commit(ctl.value); ctl.value = '';
+                    ctl.placeholder = UI.getPath(ConfigStore.get(), path) ? '已保存；输入新值替换' : (f.placeholder || '');
+                };
+                const clear = UI.el('button', { type: 'button', class: 'ul-eye', text: '清除', title: '清除已保存的密钥' });
+                UI.cap(clear, 'click', function () { dirty = false; ctl.value = ''; commit(''); ctl.placeholder = f.placeholder || ''; });
+                UI.cap(ctl, 'input', function () { dirty = true; });
+                UI.cap(ctl, 'change', persist); UI.cap(ctl, 'blur', persist);
+                sync = function () { if (!dirty) { ctl.value = ''; ctl.placeholder = UI.getPath(ConfigStore.get(), path) ? '已保存；输入新值替换' : (f.placeholder || ''); } };
+                wrap.appendChild(this.el("div", { class: "ul-inp-row" }, [ctl, clear]));
             } else if (f.type === "static") {
                 wrap.appendChild(this.el("div", { class: "ul-static", text: typeof f.value === "function" ? f.value(state) : (f.value || "") }));
             } else if (f.type === "action") {
@@ -8318,7 +8359,7 @@ function AntiCheatProbe() {
                 out.className = "ul-res " + (ok ? "ul-res-ok" : "ul-res-bad");
             });
             wrap.appendChild(this.el("div", { class: "ul-act-row" }, [copy, out]));
-            wrap.appendChild(this.el("div", { class: "ul-hint", text: "控制台自查：__ul.page() / __ul.videoProgress() / __ul.pauses() / __ul.course()" }));
+            wrap.appendChild(this.el("div", { class: "ul-hint", text: "可在设置页查看接口诊断与运行状态" }));
             wrap.appendChild(this.el("div", { class: "ul-hint", text: "ESC 关闭 · Alt+↑↓ 调序" }));
             return { el: wrap, fields: fields };
         },
@@ -8364,13 +8405,7 @@ function AntiCheatProbe() {
             }, true);
         }
     } catch (e) { }
-    // 自建 UI 就绪后，挂到控制台自查钩子（__ul.ui / __ul.config / __ul.settings）
-    try {
-        if ($w.__ul) Object.assign($w.__ul, {
-            ui: UI, config: ConfigStore, settings: openSettings,
-            migrate: migrateConfig, normalizeDoc: normalizeConfig
-        });
-    } catch (e) { }
+    /* TEST_SETTINGS_HOOK */
 
 function Bind() {
     const updateButton=document.querySelector('.ul-panel .ul-update');
@@ -8810,7 +8845,7 @@ function Get_Answer() {
             td.setAttribute("style", "padding:12px;color:#c0392b;font-size:12px;line-height:1.7;");
             td.innerText = "没找到题目（这道题的结构脚本还不认识）\n"
                 + "1) 题目在弹窗/章节测试里？先把它点开，再点【查询答案】\n"
-                + "2) 还是不行：F12 → Console 执行 __ul.page()，把结果发我（会列出页面里各类题目容器各有几个）";
+                + "2) 还是不行：请提供页面类型和题目控件说明，便于定位识别问题";
         }
     } catch (e2) { }
     AiStatus();
