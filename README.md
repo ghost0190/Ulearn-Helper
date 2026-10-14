@@ -2,7 +2,7 @@
 
 优学院（Ulearning）Tampermonkey 脚本，提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.18.2** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.18.3** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -136,6 +136,15 @@ AI 高级配置支持自定义鉴权方式、额外请求头、请求体模板�
 检查 Tampermonkey 中实际安装版本，确认只启用一份脚本，再刷新页面。GitHub 访问失败或扩展缓存可能延迟更新。
 
 反馈时请说明脚本版本、页面类型、操作步骤和错误提示。截图或诊断内容中的密钥、Token、个人信息应先隐藏。
+
+## v4.18.3 修复与验证
+
+- 综合题按可作答的子题识别，排除整组题的外层容器和独立文章展示块；单题查询与批量预取使用同一套读题逻辑。
+- 将对应题组的阅读文章附到各子题，避免混入相邻子题或其他文章。
+- 查询失败保留各来源的错误原因；并发 AI 请求的错误不会互相覆盖。
+- 单题重试只在确有旧答案时保留旧答案，空答案不再提示“已保留原答案”。
+
+新增 21 项隔离浏览器综合题检查通过，使用合成页面和模拟接口；实际考试页面的 DOM 和 Tampermonkey 安装版本尚未现场核对。
 
 ## v4.18.2 修复与验证
 

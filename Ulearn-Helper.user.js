@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.2
-// @description  Ulearn-Helper v4.18.2：修复配置权限、XHR 生命周期、配置并发、题库身份与 AI 请求解析。
+// @version      4.18.3
+// @description  Ulearn-Helper v4.18.3：修复综合题子题识别、文章上下文、来源错误提示与单题重试状态。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -2448,13 +2448,13 @@
                     timeout: 40000,
                     signal: opts.signal, valid: opts.valid,
                     onload: function (r) {
-                        if (r.status && (r.status < 200 || r.status >= 300)) return resolve({ ok: false, online: false, answer: '', source: '' });
+                        if (r.status && (r.status < 200 || r.status >= 300)) return resolve({ ok: false, online: false, answer: '', source: '', error: '服务器 HTTP ' + r.status });
                         try {
                             let j = JSON.parse(r.responseText);
                             if (j && j.code == 1 && j.data && j.data[0] && j.data[0].answer) {
                                 return resolve({ ok: true, online: true, answer: String(j.data[0].answer), source: j.from || j.data[0].source || "server" });
                             }
-                            return resolve({ ok: false, online: true, answer: "", source: "" });
+                            return resolve({ ok: false, online: true, answer: '', source: '', error: /token|quota|unauthori/i.test(String(j && j.msg || '')) ? '服务器 Token 无效或额度不足' : '' });
                         } catch (e) { resolve({ ok: false, online: false, answer: "", source: "" }); }
                     },
                     onerror: function () { resolve({ ok: false, online: false, answer: "", source: "" }); },
@@ -2470,10 +2470,15 @@
             opts = opts || {};
             let cfg = aiCfg || AIConfig.get();
             let aid = String(cfg.id || cfg.name || "default");
-            Util._lastAIError = "";
+            const fail = function (message) {
+                Util._lastAIError = message;
+                if (opts.diagnostics) opts.diagnostics.error = message;
+                return message;
+            };
+            fail('');
             let cool = _aiCool[aid] || 0;
             if (cool > Date.now()) {
-                Util._lastAIError = "被服务商限流，冷却中（还剩 " + Math.ceil((cool - Date.now()) / 1000) + " 秒）";
+                fail("被服务商限流，冷却中（还剩 " + Math.ceil((cool - Date.now()) / 1000) + " 秒）");
                 console.warn("[Ulearn-Helper] " + Util._lastAIError + "，本轮跳过");
                 return Promise.resolve("");
             }
@@ -2482,12 +2487,12 @@
             return _aiQueue(function () {
                 return new Promise(function (resolve) {
                     if (myGen !== panelGen || opts.signal && opts.signal.aborted || opts.valid && !opts.valid()) {
-                        Util._lastAIError = "已被新一次查询取代，跳过";
+                        fail("已被新一次查询取代，跳过");
                         return resolve("");
                     }
-                    if ((_aiCool[aid] || 0) > Date.now()) { Util._lastAIError = '被服务商限流，冷却中'; return resolve(''); }
+                    if ((_aiCool[aid] || 0) > Date.now()) { fail('被服务商限流，冷却中'); return resolve(''); }
                     let req = buildAIRequest(cfg, prompt);
-                    if (!req.ok) return resolve("");
+                    if (!req.ok) { fail('请求配置不完整'); return resolve(''); }
                     Util.request({
                         method: "POST",
                         url: req.url,
@@ -2500,25 +2505,25 @@
                                 let raw = String(r.responseText || "");
                                 let st = Number(r.status) || 0;
                                 if (st < 200 || st >= 300) {
-                                    Util._lastAIError = friendlyHttpError(st, raw, r.responseHeaders);
+                                    fail(friendlyHttpError(st, raw, r.responseHeaders));
                                     console.warn("[Ulearn-Helper] AI 返回 " + Util._lastAIError);
                                     if (st === 429 || st === 403 || looksLikeErrorPage(raw)) {
                                         _aiCool[aid] = Date.now() + AI_COOLDOWN;
-                                        Util._lastAIError += "（已暂停该接口 " + Math.round(AI_COOLDOWN / 1000) + " 秒）";
+                                        fail(Util._lastAIError + "（已暂停该接口 " + Math.round(AI_COOLDOWN / 1000) + " 秒）");
                                     }
                                     return resolve("");
                                 }
                                 if (looksLikeErrorPage(raw)) {
                                     _aiCool[aid] = Date.now() + AI_COOLDOWN;
-                                    Util._lastAIError = "被服务商风控拦截（返回报错页，已暂停该接口 " + Math.round(AI_COOLDOWN / 1000) + " 秒）";
+                                    fail("被服务商风控拦截（返回报错页，已暂停该接口 " + Math.round(AI_COOLDOWN / 1000) + " 秒）");
                                     console.warn("[Ulearn-Helper] " + Util._lastAIError);
                                     return resolve("");
                                 }
                                 resolve(parseAIResponse(cfg, raw));
-                            } catch (e) { resolve(""); }
+                            } catch (e) { fail('AI 响应无法解析'); resolve(''); }
                         },
-                        onerror: function () { Util._lastAIError = "网络错误（地址/Key/跨域/额度）"; console.log("[Ulearn-Helper] AI 请求失败（地址/Key/跨域/额度）"); resolve(""); },
-                        ontimeout: function () { Util._lastAIError = "请求超时"; console.log("[Ulearn-Helper] AI 请求超时"); resolve(""); }
+                        onerror: function () { fail("网络错误（地址/Key/跨域/额度）"); console.log("[Ulearn-Helper] AI 请求失败（地址/Key/跨域/额度）"); resolve(""); },
+                        ontimeout: function () { fail("请求超时"); console.log("[Ulearn-Helper] AI 请求超时"); resolve(""); }
                     });
                 });
             });
@@ -2527,37 +2532,45 @@
         // 逐题问 50 道题 = 50 个请求（慢、且容易被服务商当成爬虫限流）；
         // 这里先把整卷打包成 1 个请求，答案直接写进本地题库，后面的逐题流程会瞬间命中。
         // 题干的读法与 way1/way3 保持一致，保证题库 key 能对上。
+        _questionModel: function (div) {
+            const nodes = [div, div && div.firstElementChild, div && div.firstChild];
+            for (const node of nodes) {
+                const q = node && node.__vue__ && node.__vue__.question;
+                if (q && (q.questionid || q.questionId)) return q;
+            }
+            return null;
+        },
+        _questionControlSelector: 'textarea, [contenteditable="true"], input:not([type="hidden"]):not([type="button"]):not([type="submit"]), select, [role="combobox"], .choice-list, .checkbox, .cloze-input, .blank-question',
+        _questionContainers: '.question-item, .question-element-node, .question-wrapper, .sub-question, .sub-question-item, .child-question, .base-question',
         _read_question: function (div, kinds) {
-            let out = { title: "", options: [], typeName: "", kind: "generic", quetype: "" };
+            let out = { title: "", options: [], typeName: "", kind: "generic", quetype: "", index: "" };
             try {
-                let $div = jquery(div);
-                if (kinds == "exam") {
-                    let vue = div.firstChild && div.firstChild.__vue__ && div.firstChild.__vue__.question;
-                    if (!vue || !vue.questionid) return null;
+                let $div = jquery(div), vue = kinds === 'exam' ? Util._questionModel(div) : null;
+                const gray = div.querySelector('.gray');
+                const label = gray ? String(gray.textContent || '') : String($div.find('.tip, .question-type-tag').first().text() || '');
+                const number = label.match(/(?:^|\s)(\d+)\s*[.、．-]/);
+                out.index = vue && vue.index != null ? vue.index : number ? number[1] : '';
+                if (vue) {
                     out.quetype = vue.type;
-                    let t = re_text(vue.title || vue.stem || vue.questionContent || vue.content || "");
-                    if (!t) t = re_text($div.find(".question-title, .title, .rich-text").first().text());
-                    out.title = t;
-                } else {
-                    let grayEl = div.querySelector(".gray");
-                    let grayTxt = (grayEl && grayEl.firstChild && grayEl.firstChild.textContent) ? String(grayEl.firstChild.textContent) : "";
-                    out.quetype = grayTxt.replace(/\s/g, "").split(".")[1] || "";
-                    let titleEl = div.querySelector('.richtext-container.question-title');
-                    let t = "";
-                    if (titleEl) {
-                        t = String(titleEl.textContent || "");
-                    }
-                    if (!t.trim()) t = re_text($div.find(".question-title, .richtext-container, .title, .question-content, [class*=\"title\"]").first().text());
-                    if (!t.trim()) t = re_text($div.find("[class*=\"content\"], [class*=\"stem\"]").first().text());
-                    out.title = re_text(t);
+                    out.title = re_text(vue.title || vue.stem || vue.questionContent || vue.content || '');
+                }
+                if (!out.title) {
+                    let titleEl = div.querySelector('.richtext-container.question-title, .question-title, .question-content, .stem');
+                    let text = titleEl ? String(titleEl.textContent || '') : '';
+                    if (!text.trim()) text = $div.find('.richtext-container, .title, .rich-text, [class*="stem"]').first().text();
+                    out.title = re_text(text);
                 }
                 out.options = Util._extract_options($div, kinds);
                 out.material = Util._materialOf($div);
                 out.typeName = Util._extract_type($div, kinds);
-                if (!out.typeName && out.quetype != null) out.typeName = ({ 1: "单选题", 2: "多选题", 3: "判断题", 4: "填空题", 5: "简答题" })[out.quetype] || String(out.quetype || "");
+                if (!out.typeName && out.quetype != null) out.typeName = ({ 1: '单选题', 2: '多选题', 3: '判断题', 4: '填空题', 5: '简答题' })[out.quetype] || String(out.quetype || '');
+                if (!out.typeName) $div.find('textarea, [contenteditable="true"]').each(function () {
+                    if (String(this.tagName || '').toUpperCase() === 'TEXTAREA' || this.isContentEditable || this.getAttribute && this.getAttribute('contenteditable') === 'true') out.typeName = '简答题';
+                });
+                if (!out.quetype) out.quetype = out.typeName;
                 out.kind = Util._detect_kind(out.typeName, out.options, $div);
-                out.multiple = /多选|^2$/.test(String(out.typeName || out.quetype || "")) || $div.find('input[type="checkbox"], .ul-checkbox__input, .el-checkbox__input').length > 0;
-                if (out.multiple) { out.kind = "choice"; out.typeName = "多选题"; }
+                out.multiple = /多选|^2$/.test(String(out.typeName || out.quetype || '')) || $div.find('input[type="checkbox"], .ul-checkbox__input, .el-checkbox__input').length > 0;
+                if (out.multiple) { out.kind = 'choice'; out.typeName = '多选题'; }
                 out.blanks = Util._blankInfo($div);
                 out.blankCount = out.blanks.length;
                 if (out.blanks.some(b => b.type === 'select')) { out.kind = 'blank'; out.typeName = '选词填空'; out.options = []; }
@@ -2566,31 +2579,36 @@
                 if (stem && controls.some(el => stem.contains && stem.contains(el))) out.title = Util._stemText(stem, controls);
                 out.missingInfo = [];
                 $div.find('img').each(function () {
-                    let alt = String(this.getAttribute && (this.getAttribute('alt') || this.getAttribute('aria-label')) || "").trim();
-                    if (alt) out.material += (out.material ? "\n" : "") + "图片文字：" + alt;
-                    else out.missingInfo.push("题目中存在未转写的图片，无法读取图中信息");
+                    const alt = String(this.getAttribute && (this.getAttribute('alt') || this.getAttribute('aria-label')) || '').trim();
+                    if (alt) out.material += (out.material ? '\n' : '') + '图片文字：' + alt;
+                    else out.missingInfo.push('题目中存在未转写的图片，无法读取图中信息');
                 });
             } catch (e) { return null; }
             return out.title ? out : null;
         },
         _collectQuestions: function () {
-            let out = [];
-            let scan = function (sel, kinds) {
-                let roots = document.querySelectorAll(sel);
-                for (let i = 0; i < roots.length; i++) {
-                    let kids = roots[i].childNodes;
-                    for (let j = 0; j < kids.length; j++) {
-                        let div = kids[j];
-                        if (!div || div.nodeType != 1) continue;
-                        let cn = String(div.className || "");
-                        if (cn.indexOf("next-part") != -1 || !cn.split(/\s+/).includes("question-item")) continue;
-                        let q = Util._read_question(div, kinds);
-                        if (q) { q.div = div; out.push(q); }
-                    }
-                }
-            };
-            scan(".question-area", "exam");
-            scan(".questions", "homework");
+            const candidates = new Set(), out = [];
+            const excluded = el => !el || el.closest('.ul-panel, .ul-ovl, .ul-study-dashboard, .next-part') || !el.getClientRects().length;
+            const roots = Array.from(document.querySelectorAll('.question-area, .questions'));
+            const scopes = roots.length ? roots : [document];
+            for (const scope of scopes) {
+                scope.querySelectorAll(Util._questionContainers + ', [class*="question"], [class*="ques-"], [class*="topic"], [class*="exam-item"], [class*="subject-item"]').forEach(el => {
+                    if (excluded(el)) return;
+                    const kinds = el.closest('.question-area') || Util._questionModel(el) ? 'exam' : 'homework';
+                    const model = Util._questionModel(el);
+                    if (!el.querySelector(Util._questionControlSelector) && !(model && /^[1-5]$/.test(String(model.type)))) return;
+                    if (!Util._read_question(el, kinds)) return;
+                    candidates.add(el);
+                });
+            }
+            const list = Array.from(candidates);
+            // Pick independent leaf questions, never a passage wrapper containing its children.
+            for (const el of list) {
+                if (list.some(child => child !== el && el.contains(child))) continue;
+                const kinds = el.closest('.question-area') || Util._questionModel(el) ? 'exam' : 'homework';
+                const q = Util._read_question(el, kinds);
+                if (q && !/综合|阅读理解|完形|材料题/.test(q.typeName)) { q.div = el; q.kinds = kinds; out.push(q); }
+            }
             return out;
         },
         _batchPrompt: function (list) {
@@ -2789,6 +2807,7 @@
                     txt = $ans.find(".gray").clone().children().remove().end().text() || "";
                 }
                 if (!txt) txt = $ans.find('.question-type-tag').first().text() || '';
+                if (/综合题|阅读理解|完形填空|材料题/.test(txt)) return '综合题';
                 if (/true\s*\/\s*false/i.test(txt)) return '判断题';
                 if (/word\s*bank|fill\s+in\s+the\s+blank/i.test(txt)) return '填空题';
                 if (/short\s+answer/i.test(txt)) return '简答题';
@@ -2904,32 +2923,27 @@
         // 题块里除了题干和选项，材料题/案例题还带着一大段材料 —— 只把"问题"发给 AI，答案当然会错。
         // 这里按类名捞材料（保守：只认明确的材料类名，且至少 25 字）
         _materialOf: function ($div) {
-            let out = [];
+            const out = [], root = $div && $div.get(0);
+            const explicit = '[class*="material"], [class*="passage"], [class*="article"], [class*="case-"], [class*="reading"], [class*="context"]';
+            const add = el => { const text = re_text(el.textContent); if (text && !out.includes(text)) out.push(text); };
+            try { $div.find(explicit).each(function () { if (out.length < 6) add(this); }); } catch (e) { }
             try {
-                ['[class*="material"]', '[class*="passage"]', '[class*="article"]', '[class*="case-"]', '[class*="reading"]', '[class*="context"]'].forEach(function (sel) {
-                    $div.find(sel).each(function () {
-                        if (out.length >= 3) return;
-                        let t = re_text(jquery(this).text());
-                        if (t && out.indexOf(t) == -1) out.push(t);
-                    });
-                });
-            } catch (e) { }
-            // 综合题拆为子题后，继承外层共享材料，排除兄弟子题的材料。
-            try {
-                const root = $div.get(0);
                 for (let parent = root && root.parentElement; parent; parent = parent.parentElement) {
-                    if (parent.matches && parent.matches('.question-setting-panel')) break;
-                    if (!parent.matches || !parent.matches('.question-element-node, .question-item, .question-wrapper')) continue;
-                    const tag = parent.querySelector('.question-type-tag');
-                    if (!tag || !/综合|阅读|完形/.test(tag.textContent || '')) continue;
-                    parent.querySelectorAll('[class*="material"], [class*="passage"], [class*="article"], [class*="case-"], [class*="reading"], [class*="context"]').forEach(el => {
-                        if (out.length >= 6 || el.closest('.question-element-node, .question-item, .question-wrapper') !== parent) return;
+                    if (parent.matches && parent.matches('.question-area, .questions, .question-setting-panel')) break;
+                    if (!parent.matches || !parent.matches(Util._questionContainers)) continue;
+                    const heading = parent.querySelector('.question-type-tag, .gray, .tip');
+                    if (!heading || !/综合|阅读|完形|材料/.test(heading.textContent || '')) continue;
+                    parent.querySelectorAll(explicit + ', .question-title, .question-content, .richtext-container, .rich-text').forEach(el => {
+                        if (out.length >= 12 || el.contains(root) || el.querySelector(Util._questionControlSelector)) return;
+                        for (let owner = el.parentElement; owner && owner !== parent; owner = owner.parentElement) {
+                            if (owner.querySelector(Util._questionControlSelector)) return;
+                        }
                         const text = re_text(el.textContent);
-                        if (text && !out.includes(text)) out.push(text);
+                        if (text.length >= 25 && !out.includes(text)) out.push(text);
                     });
                 }
             } catch (e) { }
-            return out.join("\n");
+            return out.join('\n');
         },
         // 从答案里取选项序号（只认"纯字母"或"纯数字"两种写法，避免误判）
         _answerIndexes: function (answer, n) {
@@ -3256,6 +3270,7 @@
                     }
                     if (td && !td.parentNode) td = null;   // 行已被清空/脱离文档：跳过面板写入（自动填卷照旧）
                     if (td) {
+                        td._ulHasAnswer = true; td._ulAnswerFailure = "";
                         td.innerHTML = "";
                         td.setAttribute("title", "点击复制答案");
                         // 行左侧色条：本地=绿 / 远程=蓝 / 服务器=紫 / AI=橙，一眼看出答案来源
@@ -3333,8 +3348,10 @@
                     return valid() ? (opts.requireFilled ? filled || 0 : answer) : 0;
                 };
                 let cached = "";
-                let lastFrom = "";
-                let lockTxt = function (t) { if (!valid()) return; try { td.innerText = t; } catch (e) { } };
+                let lastFrom = '';
+                const failures = [];
+                const noteFailure = text => { lastFrom = text; if (!failures.includes(text)) failures.push(text); };
+                let lockTxt = function (text) { if (!valid()) return; try { td.innerText = text; td.onclick = null; td._ulHasAnswer = false; } catch (e) { } };
                 // 按[设置]里勾选并排序好的来源列表依次尝试
                 let plan = SourceConfig.plan();
                 if (!plan.length) {
@@ -3388,7 +3405,7 @@
                                     let hit2 = Bank.find(question, options, aiInfo);
                                     if (hit2 && Util._adapt_answer(hit2, options, kind, aiInfo)) return done(Util._adapt_answer(hit2, options, kind, aiInfo), "远程题库");
                                 }
-                                lastFrom = "远程库没有这道题";
+                                noteFailure("远程库没有这道题");
                             } else {
                                 let hit2 = Bank.find(question, options, aiInfo);
                                 if (hit2 && Util._adapt_answer(hit2, options, kind, aiInfo)) return done(Util._adapt_answer(hit2, options, kind, aiInfo), "远程题库");
@@ -3398,30 +3415,31 @@
                     }
                     // 自建/云端服务器
                     if (id == "server") {
-                        if (!ServerConfig.ready()) { lastFrom = "服务器未配置"; continue; }
+                        if (!ServerConfig.ready()) { noteFailure("服务器未配置"); continue; }
                         lockTxt("查询服务器中..");
                         let sr = await Util.server_cha(question, quetype, options, kind, aiInfo, { signal: opts.signal, valid });
                         if (!valid()) return 0;
                         if (sr.ok) {
                             let answer = Util._adapt_answer(sr.answer, options, kind, aiInfo);
-                            if (!answer) { lastFrom = "服务器答案格式不匹配"; continue; }
+                            if (!answer) { noteFailure("服务器答案格式不匹配"); continue; }
                             Bank.save(question, answer, sr.source || "server", options, aiInfo);
                             AiStatus();
                             return done(answer, sr.source == "ai" ? "服务器AI" : "服务器题库");
                         }
-                        lastFrom = "服务器没有这道题";
+                        noteFailure(sr.error || (sr.online === false ? '服务器连接失败或超时' : '服务器没有这道题'));
                         continue;
                     }
                     // AI 接口(可多个，各自配置)
                     if (id.indexOf("ai:") === 0) {
                         let ai = SourceConfig.aiOf(id);
                         if (!ai || !SourceConfig.aiReady(ai)) {
-                            lastFrom = "AI(" + ((ai && ai.name) || "?") + ") 未填 Key";
+                            noteFailure("AI(" + ((ai && ai.name) || "?") + ") 未填 Key");
                             lockTxt(lastFrom);
                             continue;
                         }
                         lockTxt("AI思考中..(" + (ai.name || ai.model) + ")");
-                        let raw = await Util.ask_ai(Util._build_prompt(question, options, kind, typeForParse, extra, context, aiInfo), ai, { signal: opts.signal, valid });
+                        const diagnostics = { error: '' };
+                        let raw = await Util.ask_ai(Util._build_prompt(question, options, kind, typeForParse, extra, context, aiInfo), ai, { signal: opts.signal, valid, diagnostics });
                         if (!valid()) return 0;
                         let answer = Util.parse_ai(raw, options, kind, typeForParse, aiInfo);
                         if (answer) {
@@ -3429,7 +3447,7 @@
                             AiStatus();
                             return done(answer, "AI(" + (ai.name || ai.model) + ")");
                         }
-                        lastFrom = "AI(" + (ai.name || ai.model) + ") " + (Util._lastAIError || "没给出答案");
+                        noteFailure("AI(" + (ai.name || ai.model) + ") " + (diagnostics.error || (raw ? "答案格式不匹配或无法确定" : "未返回有效答案")));
                         lockTxt(lastFrom);
                         continue;
                     }
@@ -3438,7 +3456,8 @@
                 if (!valid()) return 0;
                 SourceConfig.maybeRotate();     // 勾了"轮询"就把顺序整体前移一位（分摊到下一个来源）
                 if (cached) return done(cached, "本地题库(存疑)");
-                if (td) lockTxt(lastFrom || "无答案");
+                const failure = failures.length ? failures.join('\n') : lastFrom || '所有来源均未获得答案';
+                if (td) { lockTxt(failure); td._ulAnswerFailure = failure; }
                 Bank.markPending(question, quetype, options.join("||"));
                 Util.upload_title(question, quetype, options.join("||"));
                 return 0;
@@ -8667,7 +8686,7 @@ async function ulRetryOne(ctx) {
     const run = (td._ulRetryRun || 0) + 1;
     const generation = panelGen;
     td._ulRetryRun = run;
-    if (!td._ulRetryBackup) td._ulRetryBackup = { nodes: Array.from(td.childNodes), onclick: td.onclick };
+    if (!td._ulRetryBackup) td._ulRetryBackup = { nodes: Array.from(td.childNodes), onclick: td.onclick, hasAnswer: !!td._ulHasAnswer || !!td.querySelector(".ul-ans") };
     const backup = td._ulRetryBackup, oldNodes = backup.nodes;
     const valid = () => generation === panelGen && td._ulRetryRun === run && td.isConnected !== false && ctx.div.isConnected !== false;
     while (td.firstChild) td.removeChild(td.firstChild);
@@ -8681,12 +8700,14 @@ async function ulRetryOne(ctx) {
     } catch (e) { console.log("[Ulearn-Helper] 单题重试异常:", e); }
     if (!valid()) return;
     if (!r) {
-        td.innerHTML = '';
-        oldNodes.forEach(node => td.appendChild(node));
-        td.onclick = backup.onclick;
+        if (backup.hasAnswer) {
+            td.innerHTML = '';
+            oldNodes.forEach(node => td.appendChild(node));
+            td.onclick = backup.onclick; td._ulHasAnswer = true;
+        }
         let w = document.createElement("div");
         w.style.cssText = "color:#c0392b;font-size:11px";
-        w.textContent = "重试没拿到答案，已保留原答案";
+        w.textContent = backup.hasAnswer ? '重试未获得新答案，已保留上次答案' : '重试仍未获得答案，请查看以上来源提示';
         td.appendChild(w);
     }
     td._ulRetryBackup = null;
@@ -8779,62 +8800,11 @@ function Get_Answer() {
     let gen = ++panelGen;
     Clear_Table();
     let runAll = function () {
-    let question_area = document.querySelectorAll(".question-area");
-    question_area && (function(){
-        question_area.forEach(function (item) {
-            item.childNodes.forEach(function (div) {
-                if (!div || div.nodeType != 1) return;            // 仅处理元素节点。
-                let cn = String(div.className || "");
-                if (cn.indexOf("next-part") != -1) return;
-                if (cn == "question-item") { div._ulSeen = gen; way1(div, gen); }
-                else way2(div);
-            });
-        });
-    })();
-    let question_homework = document.querySelectorAll(".questions");
-    question_homework && (function(){
-        question_homework.forEach(function (item) {
-            item.childNodes.forEach(function (div) {
-                if (!div || div.nodeType != 1) return;            // 同上：过滤非元素节点
-                let cn = String(div.className || "");
-                if (cn.indexOf("next-part") != -1) return;
-                if (cn == "question-item") { div._ulSeen = gen; way3(div, gen); }
-                else way2(div);
-            });
-        });
-    })();
-    // 兜底一：课程页/新版页面的容器类名可能不是 .question-area / .questions，
-    // 直接按 .question-item 扫一遍上面没处理过的（有 vue.question 当考试题，否则当作业题）
-    try {
-        document.querySelectorAll(".question-item").forEach(function (div) {
-            if (!div || div.nodeType != 1 || div._ulSeen === gen) return;
-            div._ulSeen = gen;
-            let vue = div.firstChild && div.firstChild.__vue__ && div.firstChild.__vue__.question;
-            if (vue && vue.questionid) way1(div, gen); else way3(div, gen);
-        });
-    } catch (e) { console.log("[Ulearn-Helper] 题目兜底扫描异常:", e); }
-    // 兜底二：类名完全认不出时，扫"类名带 question/ques/topic 且里面有选项控件"的块
-    try {
-        let cands = document.querySelectorAll('[class*="question"], [class*="ques-"], [class*="topic"], [class*="exam-item"], [class*="subject-item"]');
-        let picked = [];
-        for (let i = 0; i < cands.length; i++) {
-            let el = cands[i];
-            if (!el || el.nodeType != 1 || el._ulSeen === gen) continue;
-            let hasCtl = false;
-            try { hasCtl = !!el.querySelector('.choice-list, input[type="radio"], input[type="checkbox"], textarea, [contenteditable="true"]'); } catch (e2) { }
-            if (!hasCtl) continue;
-            let dup = false;
-            for (let j = 0; j < picked.length; j++) { if (picked[j].contains && picked[j].contains(el)) { dup = true; break; } }
-            if (dup) continue;
-            picked.push(el);
-        }
-        picked.forEach(function (el) {
-            el._ulSeen = gen;
-            let vue = el.firstChild && el.firstChild.__vue__ && el.firstChild.__vue__.question;
-            if (vue && vue.questionid) way1(el, gen); else way3(el, gen);
-        });
-        if (picked.length) console.log("[Ulearn-Helper] 通用容器兜底：认出 " + picked.length + " 个题块");
-    } catch (e) { console.log("[Ulearn-Helper] 通用容器兜底异常:", e); }
+    const questions = Util._collectQuestions();
+    for (const q of questions) {
+        q.div._ulSeen = gen;
+        if (q.kinds === 'exam') way1(q.div, gen); else way3(q.div, gen);
+    }
     // 一个题块都没认出来：别静默什么都不发生，直接把原因和下一步写在面板里
     try {
         let tb = document.querySelector("#" + answer_table2);
@@ -8867,21 +8837,9 @@ function Get_Answer() {
 }
 //作业
 function way3(div, gen) {
-    let grayEl = div.querySelector(".gray");
-    let grayTxt = (grayEl && grayEl.firstChild && grayEl.firstChild.textContent) ? String(grayEl.firstChild.textContent) : "";
-    let [index, quetype] = grayTxt.replace(/\s/g, "").split(".");   // 节点缺失时不再抛异常
-    // 题干兜底：指定节点缺失或文本为空时，回退到整块题目区域的文本
-    let titleEl = div.querySelector('.richtext-container.question-title');
-    let title_text = "";
-    if (titleEl) {
-        title_text = String(titleEl.textContent || "");
-    }
-    if (!title_text.trim()) {
-        let $t = jquery(div).find(".question-title, .richtext-container, .title").first();
-        title_text = re_text($t.text());
-    }
     const read = Util._read_question(div, 'homework');
-    title_text = read ? read.title : re_text(title_text);
+    if (!read) return;
+    const index = read.index, quetype = read.quetype, title_text = read.title;
     let answer_table = document.querySelector("#"+answer_table2);
     if (gen != null && gen !== panelGen) return;                 // 同上
     answer_table && (async function () {
@@ -8902,34 +8860,11 @@ function way3(div, gen) {
         await ulAnswerWithRetry(ctx, t, gen);
     })();
 }
-function way2(div) {
-//   英语答题类      待提供测试账号开发
-}
 //考试
 function way1(div, gen) {
-    let vue = div.firstChild && div.firstChild.__vue__ && div.firstChild.__vue__.question;
-    let qid = vue && vue.questionid;
-    if (!qid) {
-        return;
-    }
-    let index = vue.index || "";
-    // 题干兜底：vue 字段（title/stem/questionContent/content）-> DOM 文本 -> 占位，
-    // 避免空题干发到服务器直接被拒而显示"无答案"
-    let title = re_text(vue.title || vue.stem || vue.questionContent || vue.content || "");
-    if (!title) {
-        let $t = jquery(div).find(".question-title, .title, .rich-text").first();
-        title = re_text($t.text());
-    }
     const read = Util._read_question(div, 'exam');
-    if (read) title = read.title;
-    if (!title) return;
-    let quetype = vue.type;
-    let quetxt = "";
-    let cho = vue.choices;
-    if(quetype==1||quetype==2){
-        (cho || []).forEach(function(item){quetxt+=item.text+"||";})
-        quetxt = re_text(quetxt);
-    }
+    if (!read) return;
+    const index = read.index, title = read.title, quetype = read.quetype;
     let answer_table = document.querySelector("#"+answer_table2);
     if (gen != null && gen !== panelGen) return;                 // 表格已被新一次查询刷新，丢弃本次结果
     answer_table && (async function () {
@@ -8944,11 +8879,7 @@ function way1(div, gen) {
         t = tr.insertCell();
         let ctx = { div: div, kinds: "exam", quetype: quetype, answerTd: t, extra: null, title: title };
         ulQuestionActions(tr, ctx);
-        let codeAnswer = await ulAnswerWithRetry(ctx, t, gen);
-        if(codeAnswer==0){
-            //无答案，记为待答题目
-            Util.upload_title(title, quetype, quetxt);
-        }
+        await ulAnswerWithRetry(ctx, t, gen);
     })();
 }
 //相似度匹配

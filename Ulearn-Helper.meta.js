@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.2
-// @description  Ulearn-Helper v4.18.2：修复配置权限、XHR 生命周期、配置并发、题库身份与 AI 请求解析。
+// @version      4.18.3
+// @description  Ulearn-Helper v4.18.3：修复综合题子题识别、文章上下文、来源错误提示与单题重试状态。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
