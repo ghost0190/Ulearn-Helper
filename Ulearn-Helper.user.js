@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.3
-// @description  Ulearn-Helper v4.18.3：修复综合题子题识别、文章上下文、来源错误提示与单题重试状态。
+// @version      4.18.4
+// @description  Ulearn-Helper v4.18.4：更新检查自动切换备用线路，保留综合题识别与错误提示修复。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -46,6 +46,11 @@
     let $ = function (s, c) { return (unsafeWindow.jQuery || jquery)(s, c); };
     const jquery = jQuery.noConflict();
     const $version = GM_info.script.version.replaceAll('.','');
+    if (window.top === window.self && document.documentElement) {
+        const marker = 'data-ulearn-helper-owner';
+        if (document.documentElement.getAttribute(marker) !== null) return;
+        document.documentElement.setAttribute(marker, GM_info.script.version);
+    }
 
     // 尽早接管（document-start，先于页面一切脚本）
     // 平台在页面加载早期就会做全屏/环境检测，必须让模拟代码先就位
@@ -1386,6 +1391,8 @@
     const ScriptUpdates = {
         metaURL: 'https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js',
         scriptURL: 'https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js',
+        fallbackMetaURL: 'https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.meta.js',
+        fallbackScriptURL: 'https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js',
         repoURL: 'https://github.com/ghost0190/Ulearn-Helper',
         storageKey: 'ulearn_update_state_v1',
         interval: 6 * 60 * 60 * 1000,
@@ -1449,33 +1456,53 @@
             let resolveTask;
             const task = new Promise(resolve => { resolveTask = resolve; });
             this._pending = task;
-            let settled = false, timer, request;
-            const finish = (error, latest) => {
-                if (settled) return; settled = true; clearTimeout(timer);
+            let settled = false, timer, attemptTimer, request, attempt = 0;
+            const errors = [];
+            const finish = (error, latest, transport) => {
+                if (settled) return; settled = true; clearTimeout(timer); clearTimeout(attemptTimer);
                 const state = {...this.saved(),lastAttempt:now,error:error || ''};
-                if (!error) { state.latest=latest;state.lastSuccess=Date.now(); }
+                if (!error) { state.latest=latest;state.lastSuccess=Date.now();state.transport=transport; }
                 try { GM_setValue(this.storageKey,state); } catch (e) { state.error='无法保存更新检查结果'; }
                 this._pending=null;this.notify();resolveTask({...state,available:this.compare(String(state.latest||''),this.version())>0});
             };
-            timer = setTimeout(() => { finish('更新检查超时，请稍后重试');try { request && request.abort(); } catch (e) { } }, 12000);
-            try {
-                request = GM_xmlhttpRequest({
-                    method:'GET',url:this.metaURL+'?t='+now,timeout:10000,anonymous:true,
-                    onload:r => {
-                        if(settled)return;
-                        if(Number(r.status)!==200) { finish('更新检查失败（HTTP '+(Number(r.status)||0)+'）');return; }
-                        try { finish('',this.parse(r.responseText)); } catch(e) { finish(e.message || '更新元数据解析失败'); }
-                    },
-                    onerror:()=>finish('无法连接 GitHub，稍后重试'),
-                    ontimeout:()=>finish('更新检查超时，请稍后重试'),
-                    onabort:()=>finish('更新检查已取消')
-                });
-            } catch(e) { finish('无法启动更新检查'); }
+            timer = setTimeout(() => { finish('更新检查超时：GitHub 和备用线路均无响应，请使用本地更新文件');try { request && request.abort(); } catch (e) { } }, 24000);
+            const run = index => {
+                const token = ++attempt, transport = index === 0 ? 'github' : 'cdn';
+                const active = () => !settled && token === attempt;
+                let completed = false, handle;
+                const fail = message => {
+                    if (!active() || completed) return;
+                    completed = true; clearTimeout(attemptTimer); errors.push((index === 0 ? 'GitHub：' : '备用线路：') + message);
+                    if (index === 0) run(1); else finish(errors.join('；'));
+                };
+                const timeout = index === 0 ? 8000 : 12000;
+                attemptTimer = setTimeout(() => {
+                    if (!active() || completed) return;
+                    fail('请求超时');try { handle && handle.abort(); } catch (e) { }
+                }, timeout + 500);
+                try {
+                    handle = GM_xmlhttpRequest({
+                        method:'GET',url:(index === 0 ? this.metaURL : this.fallbackMetaURL)+'?t='+now,timeout,anonymous:true,
+                        onload:r => {
+                            if (!active() || completed) return;
+                            if (Number(r.status) !== 200) { fail('HTTP '+(Number(r.status)||0)); return; }
+                            try { const latest=this.parse(r.responseText);completed=true;finish('',latest,transport); }
+                            catch(e) { fail(e.message || '更新元数据解析失败'); }
+                        },
+                        onerror:()=>fail('连接失败'),
+                        ontimeout:()=>fail('请求超时'),
+                        onabort:()=>{ if(active() && !completed) finish('更新检查已取消'); }
+                    });
+                    if (active() && !completed) request = handle;
+                } catch(e) { fail('无法启动请求'); }
+            };
+            run(0);
             return task;
         },
         install() {
             if (!this.state().available) return false;
-            GM_openInTab(this.scriptURL+'?v='+encodeURIComponent(this.state().latest),{active:true,insert:true});return true;
+            const state=this.state(), url=state.transport === 'cdn' ? this.fallbackScriptURL : this.scriptURL;
+            GM_openInTab(url+'?v='+encodeURIComponent(state.latest),{active:true,insert:true});return true;
         }
     };
 
@@ -2112,6 +2139,7 @@
 
     //重写qsall
     const originalQuerySelectorAll = document.querySelectorAll;
+    let querySelectorRewriteLogged = false;
     Object.defineProperty(document, 'querySelectorAll', {
         configurable: true,     // 允许被覆盖/恢复，避免把页面永久锁死
         get() {
@@ -2119,7 +2147,10 @@
         },
         set(newFunc) {
             // 静默忽略：以前这里 throw，会让页面其它脚本在自己的赋值语句上抛异常
-            console.log("[Ulearn-Helper] 已忽略对 document.querySelectorAll 的改写");
+            if (newFunc !== originalQuerySelectorAll && !querySelectorRewriteLogged) {
+                querySelectorRewriteLogged = true;
+                console.log("[Ulearn-Helper] 已忽略对 document.querySelectorAll 的改写（本页仅提示一次）");
+            }
         }
     })
     //处理类
@@ -2536,7 +2567,7 @@
             const nodes = [div, div && div.firstElementChild, div && div.firstChild];
             for (const node of nodes) {
                 const q = node && node.__vue__ && node.__vue__.question;
-                if (q && (q.questionid || q.questionId)) return q;
+                if (q && (q.questionid || q.questionId || q.id) && (q.type != null || q.title != null)) return q;
             }
             return null;
         },
@@ -2555,7 +2586,7 @@
                     out.title = re_text(vue.title || vue.stem || vue.questionContent || vue.content || '');
                 }
                 if (!out.title) {
-                    let titleEl = div.querySelector('.richtext-container.question-title, .question-title, .question-content, .stem');
+                    let titleEl = div.querySelector('.richtext-container.question-title, .question-title, .question-content, .stem, .title > .rich-text');
                     let text = titleEl ? String(titleEl.textContent || '') : '';
                     if (!text.trim()) text = $div.find('.richtext-container, .title, .rich-text, [class*="stem"]').first().text();
                     out.title = re_text(text);
@@ -2563,6 +2594,7 @@
                 out.options = Util._extract_options($div, kinds);
                 out.material = Util._materialOf($div);
                 out.typeName = Util._extract_type($div, kinds);
+                if (vue && Number(vue.type) === 24) out.typeName = '综合题';
                 if (!out.typeName && out.quetype != null) out.typeName = ({ 1: '单选题', 2: '多选题', 3: '判断题', 4: '填空题', 5: '简答题' })[out.quetype] || String(out.quetype || '');
                 if (!out.typeName) $div.find('textarea, [contenteditable="true"]').each(function () {
                     if (String(this.tagName || '').toUpperCase() === 'TEXTAREA' || this.isContentEditable || this.getAttribute && this.getAttribute('contenteditable') === 'true') out.typeName = '简答题';
@@ -2800,7 +2832,8 @@
         _extract_type: function ($ans, kinds) {
             if (!$ans || !$ans.length) return "";
             try {
-                let txt = "";
+                let txt = $ans.find('.comprehensive-title-tip').first().text() || "";
+                if (/综合题|阅读理解|完形填空|材料题/.test(txt)) return '综合题';
                 if (kinds == "exam") {
                     txt = $ans.find(".base-question .title .tip").text() || $ans.find(".tip").first().text() || "";
                 } else if (kinds == "homework") {
@@ -2931,8 +2964,9 @@
                 for (let parent = root && root.parentElement; parent; parent = parent.parentElement) {
                     if (parent.matches && parent.matches('.question-area, .questions, .question-setting-panel')) break;
                     if (!parent.matches || !parent.matches(Util._questionContainers)) continue;
-                    const heading = parent.querySelector('.question-type-tag, .gray, .tip');
-                    if (!heading || !/综合|阅读|完形|材料/.test(heading.textContent || '')) continue;
+                    const heading = parent.querySelector('.comprehensive-title-tip, .question-type-tag, .gray, .tip');
+                    const model = Util._questionModel(parent);
+                    if (!(model && Number(model.type) === 24) && (!heading || !/综合|阅读|完形|材料/.test(heading.textContent || ''))) continue;
                     parent.querySelectorAll(explicit + ', .question-title, .question-content, .richtext-container, .rich-text').forEach(el => {
                         if (out.length >= 12 || el.contains(root) || el.querySelector(Util._questionControlSelector)) return;
                         for (let owner = el.parentElement; owner && owner !== parent; owner = owner.parentElement) {

@@ -2,7 +2,7 @@
 
 优学院（Ulearning）Tampermonkey 脚本，提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.18.3** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.18.4** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -27,6 +27,8 @@ v4.18.1 将安装名称统一为 Ulearn-Helper。如果仍显示旧名称，优�
 | 设置 → 关于 → 检查更新 | 手动检查，并提供新版本安装入口；启动检查可在这里关闭 |
 
 脚本中的版本检查只提示更新，不会直接替换正在运行的代码。GitHub 无法访问时，已安装的脚本仍可使用。
+
+脚本内检查优先使用 GitHub 原始文件，失败后自动请求同一公开仓库的 jsDelivr 备用线路；成功后安装按钮使用对应线路。备用线路有缓存，可能晚于 GitHub 显示新版本。Tampermonkey 自带的更新检查仍由扩展执行，不使用脚本内的备用请求逻辑。
 
 ## 开始使用
 
@@ -136,6 +138,14 @@ AI 高级配置支持自定义鉴权方式、额外请求头、请求体模板�
 检查 Tampermonkey 中实际安装版本，确认只启用一份脚本，再刷新页面。GitHub 访问失败或扩展缓存可能延迟更新。
 
 反馈时请说明脚本版本、页面类型、操作步骤和错误提示。截图或诊断内容中的密钥、Token、个人信息应先隐藏。
+
+## v4.18.4 修复与验证
+
+- 更新检查增加备用线路、每次请求及整体超时保护；忽略前一线路迟到的响应，并保留两条线路的失败原因。
+- 页面运行实例增加统一标记，避免同时安装多份新版脚本时重复初始化；选择器保护提示每页最多输出一次。
+- 补充实际综合题组件的标题、文章区域及 Vue `id` 识别，避免把子题编号和分值混入题干。
+
+37 项更新逻辑检查、18 项更新设置浏览器检查、3 项重复运行检查及 25 项综合题浏览器检查通过。综合题测试结构依据页面公开组件代码构造；尚未核对当前作答页的完整 DOM，未调用付费 AI 或提交考试。
 
 ## v4.18.3 修复与验证
 
