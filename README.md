@@ -2,7 +2,7 @@
 
 优学院（Ulearning）Tampermonkey 脚本，提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.18.4** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.18.5** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -138,6 +138,16 @@ AI 高级配置支持自定义鉴权方式、额外请求头、请求体模板�
 检查 Tampermonkey 中实际安装版本，确认只启用一份脚本，再刷新页面。GitHub 访问失败或扩展缓存可能延迟更新。
 
 反馈时请说明脚本版本、页面类型、操作步骤和错误提示。截图或诊断内容中的密钥、Token、个人信息应先隐藏。
+
+## v4.18.5 修复与验证
+
+- 防重复启动在 HTML 根节点创建之前也生效，并在使用 jQuery 或安装页面钩子前完成检查。
+- 先确定综合题子题边界，再读取题干；子题读取失败时不将整篇材料作为替代题目。
+- 解码英语题干中的弯引号、撇号等 HTML 实体，使 Vue 题干与页面显示保持一致。
+- **设置 → 关于 → 复制题目识别诊断**：提供当前脚本实际识别的题干、题号、题型、材料长度、控件所属题块和面板数量；不读取已填答案或接口配置，也不发送网络请求。
+- 回归使用用户提供的第 11–20 题结构和 Vue 数据，以及合成材料；这些检查不能替代实际油猴环境中的更新后核对。
+
+更新不会替换已打开页面中的脚本实例。若考试仍在进行，不必为了更新退出全屏或刷新考试；新版在之后正常加载的页面生效。
 
 ## v4.18.4 修复与验证
 

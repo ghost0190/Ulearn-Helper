@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.4
-// @description  Ulearn-Helper v4.18.4：更新检查自动切换备用线路，保留综合题识别与错误提示修复。
+// @version      4.18.5
+// @description  Ulearn-Helper v4.18.5：修复页面早期重复启动，强化综合题子题边界并增加只读识别诊断。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js

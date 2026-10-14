@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.4
-// @description  Ulearn-Helper v4.18.4：更新检查自动切换备用线路，保留综合题识别与错误提示修复。
+// @version      4.18.5
+// @description  Ulearn-Helper v4.18.5：修复页面早期重复启动，强化综合题子题边界并增加只读识别诊断。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -41,16 +41,31 @@
 
 (function () {
     "use strict";
+    // Claim ownership before jQuery or any page hooks, including before <html> exists.
+    function claimRuntime() {
+        if (window.top !== window.self) return true;
+        const marker = 'data-ulearn-helper-owner';
+        const sentinel = 'Ulearn-Helper runtime owner';
+        if (document.documentElement && document.documentElement.getAttribute(marker) !== null) return false;
+        if (Array.from(document.childNodes || []).some(node => node.nodeType === 8 && node.nodeValue === sentinel)) return false;
+        if (document.documentElement) document.documentElement.setAttribute(marker, GM_info.script.version);
+        else {
+            document.appendChild(document.createComment(sentinel));
+            const observer = new MutationObserver(() => {
+                if (!document.documentElement) return;
+                document.documentElement.setAttribute(marker, GM_info.script.version);
+                observer.disconnect();
+            });
+            observer.observe(document, { childList: true });
+        }
+        return true;
+    }
+    if (!claimRuntime()) return;
     const $w = unsafeWindow;
     // document-start 运行时页面 jQuery 尚未加载，$ 改为动态取用（页面 jQuery 就绪前回退到沙箱 jQuery）
     let $ = function (s, c) { return (unsafeWindow.jQuery || jquery)(s, c); };
     const jquery = jQuery.noConflict();
     const $version = GM_info.script.version.replaceAll('.','');
-    if (window.top === window.self && document.documentElement) {
-        const marker = 'data-ulearn-helper-owner';
-        if (document.documentElement.getAttribute(marker) !== null) return;
-        document.documentElement.setAttribute(marker, GM_info.script.version);
-    }
 
     // 尽早接管（document-start，先于页面一切脚本）
     // 平台在页面加载早期就会做全屏/环境检测，必须让模拟代码先就位
@@ -169,7 +184,8 @@
     const AnswerProtocol = (function createAnswerProtocol() {
     const kinds = ['choice', 'judge', 'blank', 'essay', 'translate', 'generic'];
     function text(value) {
-        const entities = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'", nbsp: ' ', le: '≤', ge: '≥', times: '×', divide: '÷', minus: '−', pi: 'π' };
+        const entities = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'", nbsp: ' ', le: '≤', ge: '≥', times: '×', divide: '÷', minus: '−', pi: 'π',
+            lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', ndash: '–', mdash: '—', hellip: '…', ensp: ' ', emsp: ' ' };
         return String(value == null ? '' : value)
             .replace(/<img\b[^>]*>/gi, tag => {
                 const alt = tag.match(/\balt\s*=\s*["']([^"']*)["']/i);
@@ -2629,7 +2645,9 @@
                     const kinds = el.closest('.question-area') || Util._questionModel(el) ? 'exam' : 'homework';
                     const model = Util._questionModel(el);
                     if (!el.querySelector(Util._questionControlSelector) && !(model && /^[1-5]$/.test(String(model.type)))) return;
-                    if (!Util._read_question(el, kinds)) return;
+                    // Keep structural child boundaries even if reading a child fails.
+                    // Otherwise a malformed child can make its passage become an answer row.
+                    if (!el.matches(Util._questionContainers) && !(model && /^[1-5]$/.test(String(model.type))) && !Util._read_question(el, kinds)) return;
                     candidates.add(el);
                 });
             }
@@ -2642,6 +2660,30 @@
                 if (q && !/综合|阅读理解|完形|材料题/.test(q.typeName)) { q.div = el; q.kinds = kinds; out.push(q); }
             }
             return out;
+        },
+        _questionDiagnostics: function () {
+            const brief = text => String(text || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+            const summarize = el => {
+                let q = null, error = '';
+                try { q = Util._read_question(el, el.closest('.question-area') || Util._questionModel(el) ? 'exam' : 'homework'); }
+                catch (e) { error = '题目读取异常'; }
+                return { class: String(el.className || ''), visible: !!el.getClientRects().length,
+                    title: q ? brief(q.title) : '', type: q ? q.typeName : '', index: q ? q.index : '',
+                    materialLength: q ? q.material.length : 0, readable: !!q, error,
+                    domStem: brief(el.querySelector('.title > .rich-text, .question-title, .question-content, .stem')?.textContent) };
+            };
+            let collected = [], error = '';
+            try { collected = Util._collectQuestions(); } catch (e) { error = '题目收集异常'; }
+            const leaves = new Set();
+            document.querySelectorAll(Util._questionControlSelector).forEach(el => {
+                if (el.closest('.ul-panel, .ul-ovl, .ul-study-dashboard, .next-part')) return;
+                const owner = el.closest(Util._questionContainers);
+                if (owner) leaves.add(owner);
+            });
+            return { version: GM_info.script.version, build: 'leaf-boundaries-20261014',
+                panelCount: document.querySelectorAll('.ul-panel').length, error,
+                questionCount: collected.length, questions: collected.slice(0, 100).map(q => summarize(q.div)),
+                controlOwners: Array.from(leaves).slice(0, 100).map(summarize) };
         },
         _batchPrompt: function (list) {
             return AnswerProtocol.batchPrompt((list || []).map(q => Object.assign({}, q, { extra: q.extra || QExtra.get(q.title, q.options) })));
@@ -8412,6 +8454,14 @@ function AntiCheatProbe() {
                 out.className = "ul-res " + (ok ? "ul-res-ok" : "ul-res-bad");
             });
             wrap.appendChild(this.el("div", { class: "ul-act-row" }, [copy, out]));
+            const questionReport = this.el('button', { type: 'button', class: 'ul-sbtn', text: '复制题目识别诊断' });
+            const questionReportStatus = this.el('span', { class: 'ul-res', role: 'status' });
+            UI.cap(questionReport, 'click', () => {
+                const ok = Util.copy(JSON.stringify(Util._questionDiagnostics(), null, 2), questionReport);
+                questionReportStatus.textContent = ok ? '已复制题目识别诊断' : '复制失败';
+            });
+            wrap.appendChild(this.el('div', { class: 'ul-act-row' }, [questionReport, questionReportStatus]));
+            wrap.appendChild(this.el('div', { class: 'ul-hint', text: '题目识别诊断只读取题干、题型、材料长度和面板数量，不读取已填答案或接口配置。' }));
             wrap.appendChild(this.el("div", { class: "ul-hint", text: "可在设置页查看接口诊断与运行状态" }));
             wrap.appendChild(this.el("div", { class: "ul-hint", text: "ESC 关闭 · Alt+↑↓ 调序" }));
             return { el: wrap, fields: fields };
