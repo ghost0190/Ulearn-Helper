@@ -2,7 +2,7 @@
 
 优学院（Ulearning）Tampermonkey 脚本，提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.18.5** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.18.6** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -138,6 +138,21 @@ AI 高级配置支持自定义鉴权方式、额外请求头、请求体模板�
 检查 Tampermonkey 中实际安装版本，确认只启用一份脚本，再刷新页面。GitHub 访问失败或扩展缓存可能延迟更新。
 
 反馈时请说明脚本版本、页面类型、操作步骤和错误提示。截图或诊断内容中的密钥、Token、个人信息应先隐藏。
+
+## v4.18.6 英语下拉填空与运行日志
+
+- 修复 `.title > .rich-text` 中的英语下拉填空：题干保留有序空位标记，候选列表单独发送，避免重复混入正文。
+- 下拉答案支持精确匹配纯词或完整候选句段；仅在选项字母与实际序号一致时去掉标签，重复候选仍拒绝含糊匹配。
+- 修复超过 1,500 字符的合法多空／批量 JSON 答案被误判为报错内容；继续拒绝 HTML、错误对象、嵌套或超限数据。
+
+- **设置 → 关于 → 复制题目识别诊断** 增加实际运行代码版本、实例 ID、各面板的题干列表及最近 200 条流程日志。
+- 控制台以 `[Ulearn-Helper][trace]` 为前缀，记录题目收集与排除、答案行创建、来源尝试、AI HTTP 状态及填写数量；题目读取异常标明失败阶段。
+- 日志仅保留题干摘要、长度、数量和状态，不包含 API 地址、请求头、密钥、Token、AI 答案正文或控件中已填的答案；连续重复事件合并。
+- 运行代码版本与脚本元数据版本分别记录，便于识别旧页面、重复面板和安装版本与运行实例之间的差异。
+
+使用用户提供的“6 阅读理解 2（四级）03+08”保存页验证两道各 10 空的下拉题（分别 15 和 12 个候选），并用模拟候选核对填写；未调用付费 AI 或修改实际考试。该保存页不包含赵州桥综合题，不能代替那组题在实际安装环境中的验证。
+
+更新安装后，旧考试窗口仍保持原来的脚本实例。正在考试时可先导出当前诊断，避免为了获取日志重新打开考试。
 
 ## v4.18.5 修复与验证
 

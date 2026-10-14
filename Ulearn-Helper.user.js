@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.5
-// @description  Ulearn-Helper v4.18.5：修复页面早期重复启动，强化综合题子题边界并增加只读识别诊断。
+// @version      4.18.6
+// @description  Ulearn-Helper v4.18.6：修复英语下拉填空题干、选项匹配和长 JSON 答案解析，增加答题诊断日志。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -60,7 +60,37 @@
         }
         return true;
     }
-    if (!claimRuntime()) return;
+    if (!claimRuntime()) {
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.18.6');
+        return;
+    }
+    const RuntimeTrace = {
+        codeVersion: '4.18.6',
+        instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
+        events: [], limit: 200,
+        record(event, data) {
+            try {
+                const allowed = ['class', 'index', 'type', 'kind', 'titlePreview', 'titleLength', 'materialLength', 'optionCount', 'blankCount',
+                    'count', 'candidateCount', 'scopeCount', 'panelCount', 'controlCount', 'stage', 'errorName', 'source', 'sourcePosition',
+                    'valid', 'filled', 'generation', 'metadataVersion', 'rootPresent', 'hasAnswer', 'responseLength', 'outcome', 'status'];
+                const clean = {};
+                for (const key of allowed) {
+                    const value = data && data[key];
+                    if (['number', 'boolean'].includes(typeof value)) clean[key] = value;
+                    else if (typeof value === 'string') clean[key] = value.replace(/\s+/g, ' ').slice(0, 180);
+                }
+                const last = this.events[this.events.length - 1];
+                if (last && last.event === event && JSON.stringify(last.data) === JSON.stringify(clean)) { last.repeats = (last.repeats || 1) + 1; return; }
+                const item = {time: new Date().toISOString(), event, data: clean};
+                this.events.push(item);
+                if (this.events.length > this.limit) this.events.shift();
+                console.info('[Ulearn-Helper][trace][' + this.codeVersion + '][' + this.instance + '] ' + event + ' ' + JSON.stringify(clean));
+            } catch (e) { }
+        },
+        snapshot() { return {codeVersion: this.codeVersion, instance: this.instance, limit: this.limit, events: this.events.map(item => ({...item, data: {...item.data}}))}; }
+    };
+    // END RUNTIME TRACE
+    RuntimeTrace.record('runtime_started', {metadataVersion: GM_info.script.version, rootPresent: !!document.documentElement});
     const $w = unsafeWindow;
     // document-start 运行时页面 jQuery 尚未加载，$ 改为动态取用（页面 jQuery 就绪前回退到沙箱 jQuery）
     let $ = function (s, c) { return (unsafeWindow.jQuery || jquery)(s, c); };
@@ -272,9 +302,18 @@
         if (decoded && typeof decoded === 'object' && !Array.isArray(decoded)) value = decoded.choices || decoded.answer;
         let raw = typeof value === 'string' ? answerPart(value, false) : value;
         const norm = v => text(v).replace(/\s+/g, ' ').trim();
+        const matches = item => {
+            const target = norm(item);
+            const full = options.map((o, i) => norm(o) === target ? i : -1).filter(i => i >= 0);
+            if (full.length) return full;
+            return options.map((o, i) => {
+                const label = norm(o).match(/^([A-Z])[.、．:)）]\s*([\s\S]+)$/);
+                return label && label[1] === String.fromCharCode(65 + i) && norm(label[2]) === target ? i : -1;
+            }).filter(i => i >= 0);
+        };
         // Complete option text takes precedence over letters and numbers.
         if (typeof raw === 'string') {
-            const exact = options.map((o, i) => norm(o) === norm(raw) ? i : -1).filter(i => i >= 0);
+            const exact = matches(raw);
             if (exact.length === 1) return exact;
             if (exact.length > 1) return null;
         }
@@ -297,10 +336,11 @@
         const out = [];
         for (const item of values) {
             let index;
-            const exact = options.map((o, i) => norm(o) === norm(item) ? i : -1).filter(i => i >= 0);
+            const exact = matches(item);
             if (typeof item === 'number') index = item;
-            else if (/^[A-Z]$/.test(String(item))) index = String(item).charCodeAt(0) - 65;
+            else if (exact.length > 1) return null;
             else if (exact.length === 1) index = exact[0];
+            else if (/^[A-Z]$/.test(String(item))) index = String(item).charCodeAt(0) - 65;
             else return null;
             if (!Number.isSafeInteger(index) || index < 0 || index >= options.length) return null;
             if (!out.includes(index)) out.push(index);
@@ -833,13 +873,36 @@
         if (head.indexOf("<") !== -1 && ERROR_PAGE_RE.test(head)) return true;              // 报错页关键词 + 标签
         return false;
     };
-    // 纯文本答案的合理上限（简答题也不会超过；超长且带标签/链接的基本是整页东西）
+    // 长文本先排除报错页；合法多空或批量 JSON 另按结构核对。
     const MAX_ANSWER_LEN = 1500;
     const isJunkAnswer = function (a) {
         let s0 = String(a == null ? "" : a).trim();
         if (!s0) return false;
         if (looksLikeErrorPage(s0)) return true;
-        if (s0.length > MAX_ANSWER_LEN && /[<>{}]|https?:\/\//i.test(s0)) return true;
+        if (s0.length > MAX_ANSWER_LEN && /[<>{}]|https?:\/\//i.test(s0)) {
+            try {
+                if (s0.length > 100000) return true;
+                const value = JSON.parse(s0.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+                const scalar = v => v == null || typeof v === 'boolean' || typeof v === 'number' && Number.isFinite(v)
+                    || typeof v === 'string' && v.length <= 20000 && !looksLikeErrorPage(v) && !/<(?:html|head|body|script|style|meta)\b/i.test(v);
+                const payload = v => Array.isArray(v) ? v.length <= 200 && v.every(scalar) : scalar(v);
+                const envelope = v => {
+                    if (!v || typeof v !== 'object' || Array.isArray(v)) return payload(v);
+                    const keys = Object.keys(v);
+                    return keys.length > 0 && keys.every(k => ['status', 'answer', 'choices'].includes(k))
+                        && (Object.prototype.hasOwnProperty.call(v, 'answer') || Object.prototype.hasOwnProperty.call(v, 'choices'))
+                        && (v.status == null || ['ok', 'unknown', 'uncertain'].includes(v.status))
+                        && (!Object.prototype.hasOwnProperty.call(v, 'answer') || payload(v.answer))
+                        && (!Object.prototype.hasOwnProperty.call(v, 'choices') || payload(v.choices));
+                };
+                if (envelope(value)) return false;
+                if (value && typeof value === 'object' && !Array.isArray(value)) {
+                    const keys = Object.keys(value);
+                    if (keys.length > 0 && keys.length <= 200 && keys.every(k => /^[1-9]\d*$/.test(k) && Number(k) <= 200 && envelope(value[k]))) return false;
+                }
+            } catch (e) { }
+            return true;
+        }
         return false;
     };
     // AI 请求节流与冷却
@@ -2367,6 +2430,7 @@
                 if (index >= 0) return ' [空' + (index + 1) + '] ';
                 if (node.nodeType === 3) return node.textContent || '';
                 if (/^(SCRIPT|STYLE)$/i.test(node.tagName || '')) return '';
+                if (controls.length && root.closest && root.closest('.banked-cloze-question') && node.matches && node.matches('.word-list')) return '';
                 if (String(node.tagName).toUpperCase() === 'BR') return '\n';
                 return node.childNodes ? Array.from(node.childNodes).map(walk).join('') : node.textContent || '';
             };
@@ -2551,6 +2615,7 @@
                             try {
                                 let raw = String(r.responseText || "");
                                 let st = Number(r.status) || 0;
+                                Util._trace('ai_http_result', {status: st, responseLength: raw.length});
                                 if (st < 200 || st >= 300) {
                                     fail(friendlyHttpError(st, raw, r.responseHeaders));
                                     console.warn("[Ulearn-Helper] AI 返回 " + Util._lastAIError);
@@ -2569,8 +2634,8 @@
                                 resolve(parseAIResponse(cfg, raw));
                             } catch (e) { fail('AI 响应无法解析'); resolve(''); }
                         },
-                        onerror: function () { fail("网络错误（地址/Key/跨域/额度）"); console.log("[Ulearn-Helper] AI 请求失败（地址/Key/跨域/额度）"); resolve(""); },
-                        ontimeout: function () { fail("请求超时"); console.log("[Ulearn-Helper] AI 请求超时"); resolve(""); }
+                        onerror: function () { Util._trace('ai_transport_failed', {outcome: 'network'}); fail("网络错误（地址/Key/跨域/额度）"); console.log("[Ulearn-Helper] AI 请求失败（地址/Key/跨域/额度）"); resolve(""); },
+                        ontimeout: function () { Util._trace('ai_transport_failed', {outcome: 'timeout'}); fail("请求超时"); console.log("[Ulearn-Helper] AI 请求超时"); resolve(""); }
                     });
                 });
             });
@@ -2589,8 +2654,18 @@
         },
         _questionControlSelector: 'textarea, [contenteditable="true"], input:not([type="hidden"]):not([type="button"]):not([type="submit"]), select, [role="combobox"], .choice-list, .checkbox, .cloze-input, .blank-question',
         _questionContainers: '.question-item, .question-element-node, .question-wrapper, .sub-question, .sub-question-item, .child-question, .base-question',
+        _trace: function (event, data) {
+            if (typeof RuntimeTrace !== 'undefined') RuntimeTrace.record(event, data);
+        },
+        _traceQuestion: function (event, q, data) {
+            Util._trace(event, Object.assign({ class: q && q.div ? String(q.div.className || '') : '', index: q && q.index,
+                type: q && q.typeName, kind: q && q.kind, titlePreview: String(q && q.title || '').slice(0, 120),
+                titleLength: String(q && q.title || '').length, materialLength: String(q && q.material || '').length,
+                optionCount: q && q.options ? q.options.length : 0, blankCount: q && q.blankCount || 0 }, data || {}));
+        },
         _read_question: function (div, kinds) {
             let out = { title: "", options: [], typeName: "", kind: "generic", quetype: "", index: "" };
+            let readStage = 'metadata';
             try {
                 let $div = jquery(div), vue = kinds === 'exam' ? Util._questionModel(div) : null;
                 const gray = div.querySelector('.gray');
@@ -2601,14 +2676,18 @@
                     out.quetype = vue.type;
                     out.title = re_text(vue.title || vue.stem || vue.questionContent || vue.content || '');
                 }
+                readStage = 'title';
                 if (!out.title) {
                     let titleEl = div.querySelector('.richtext-container.question-title, .question-title, .question-content, .stem, .title > .rich-text');
                     let text = titleEl ? String(titleEl.textContent || '') : '';
                     if (!text.trim()) text = $div.find('.richtext-container, .title, .rich-text, [class*="stem"]').first().text();
                     out.title = re_text(text);
                 }
+                readStage = 'options';
                 out.options = Util._extract_options($div, kinds);
+                readStage = 'material';
                 out.material = Util._materialOf($div);
+                readStage = 'type';
                 out.typeName = Util._extract_type($div, kinds);
                 if (vue && Number(vue.type) === 24) out.typeName = '综合题';
                 if (!out.typeName && out.quetype != null) out.typeName = ({ 1: '单选题', 2: '多选题', 3: '判断题', 4: '填空题', 5: '简答题' })[out.quetype] || String(out.quetype || '');
@@ -2619,19 +2698,21 @@
                 out.kind = Util._detect_kind(out.typeName, out.options, $div);
                 out.multiple = /多选|^2$/.test(String(out.typeName || out.quetype || '')) || $div.find('input[type="checkbox"], .ul-checkbox__input, .el-checkbox__input').length > 0;
                 if (out.multiple) { out.kind = 'choice'; out.typeName = '多选题'; }
+                readStage = 'blanks';
                 out.blanks = Util._blankInfo($div);
                 out.blankCount = out.blanks.length;
                 if (out.blanks.some(b => b.type === 'select')) { out.kind = 'blank'; out.typeName = '选词填空'; out.options = []; }
-                const stem = div.querySelector('.question-title, .question-content, .stem');
+                const stem = div.querySelector('.question-title, .question-content, .stem, .title > .rich-text');
                 const controls = Util._blankControls($div);
                 if (stem && controls.some(el => stem.contains && stem.contains(el))) out.title = Util._stemText(stem, controls);
                 out.missingInfo = [];
+                readStage = 'images';
                 $div.find('img').each(function () {
                     const alt = String(this.getAttribute && (this.getAttribute('alt') || this.getAttribute('aria-label')) || '').trim();
                     if (alt) out.material += (out.material ? '\n' : '') + '图片文字：' + alt;
                     else out.missingInfo.push('题目中存在未转写的图片，无法读取图中信息');
                 });
-            } catch (e) { return null; }
+            } catch (e) { Util._trace('question_read_failed', {class: String(div && div.className || ''), stage: readStage, errorName: String(e && e.name || 'Error')}); return null; }
             return out.title ? out : null;
         },
         _collectQuestions: function () {
@@ -2639,6 +2720,7 @@
             const excluded = el => !el || el.closest('.ul-panel, .ul-ovl, .ul-study-dashboard, .next-part') || !el.getClientRects().length;
             const roots = Array.from(document.querySelectorAll('.question-area, .questions'));
             const scopes = roots.length ? roots : [document];
+            Util._trace('collect_started', {scopeCount: scopes.length, panelCount: document.querySelectorAll('.ul-panel').length});
             for (const scope of scopes) {
                 scope.querySelectorAll(Util._questionContainers + ', [class*="question"], [class*="ques-"], [class*="topic"], [class*="exam-item"], [class*="subject-item"]').forEach(el => {
                     if (excluded(el)) return;
@@ -2654,11 +2736,13 @@
             const list = Array.from(candidates);
             // Pick independent leaf questions, never a passage wrapper containing its children.
             for (const el of list) {
-                if (list.some(child => child !== el && el.contains(child))) continue;
+                if (list.some(child => child !== el && el.contains(child))) { Util._trace('parent_question_skipped', {class: String(el.className || '')}); continue; }
                 const kinds = el.closest('.question-area') || Util._questionModel(el) ? 'exam' : 'homework';
                 const q = Util._read_question(el, kinds);
-                if (q && !/综合|阅读理解|完形|材料题/.test(q.typeName)) { q.div = el; q.kinds = kinds; out.push(q); }
+                if (q && !/综合|阅读理解|完形|材料题/.test(q.typeName)) { q.div = el; q.kinds = kinds; out.push(q); Util._traceQuestion('question_collected', q); }
+                else Util._trace('leaf_question_skipped', {class: String(el.className || ''), outcome: q ? 'composite' : 'unreadable'});
             }
+            Util._trace('collect_finished', {candidateCount: list.length, count: out.length});
             return out;
         },
         _questionDiagnostics: function () {
@@ -2680,7 +2764,13 @@
                 const owner = el.closest(Util._questionContainers);
                 if (owner) leaves.add(owner);
             });
-            return { version: GM_info.script.version, build: 'leaf-boundaries-20261014',
+            const panels = Array.from(document.querySelectorAll('.ul-panel')).map(panel => ({
+                runtime: panel.getAttribute('data-ul-runtime'), codeVersion: panel.getAttribute('data-ul-code-version'),
+                displayedVersion: (String(panel.querySelector('.ul-head')?.textContent || '').match(/v\d+\.\d+\.\d+/) || [])[0] || '',
+                rows: Array.from(panel.querySelectorAll('table tr')).slice(1, 101).map(row => brief(row.cells[0]?.textContent))
+            }));
+            return { version: GM_info.script.version, build: 'answer-trace-20261014',
+                runtime: typeof RuntimeTrace !== 'undefined' ? RuntimeTrace.snapshot() : null, panels,
                 panelCount: document.querySelectorAll('.ul-panel').length, error,
                 questionCount: collected.length, questions: collected.slice(0, 100).map(q => summarize(q.div)),
                 controlOwners: Array.from(leaves).slice(0, 100).map(summarize) };
@@ -3322,6 +3412,7 @@
                 } catch (e) { }
                 let typeForParse = isMulti ? "多选题" : typeName;
                 let aiInfo = Object.assign({}, qinfo || {}, { title: question, typeName: typeForParse, kind, multiple: isMulti, options, extra, material: context });
+                Util._traceQuestion('answer_lookup_started', aiInfo, {class: String(root && root.className || ''), generation});
                 if (extra) console.log("[Ulearn-Helper] 本题带补充信息(" + extra.length + " 字)，已附加到提示词");
                 let done = async function (answer, from) {
                     if (!valid()) return 0;
@@ -3338,7 +3429,8 @@
                     // 把服务器/题库答案对齐到当前页面提取到的选项原文，保证点击匹配成功
                     // 判断题先按题型归一化（中文"正确/错误" → true/false），再做选项对齐
                     answer = Util._adapt_answer(answer, options, kind, aiInfo);
-                    if (!answer) { if (td) td.innerText = "答案格式不匹配"; return 0; }
+                    if (!answer) { Util._trace('answer_rejected', {index: aiInfo.index, outcome: 'format'}); if (td) td.innerText = "答案格式不匹配"; return 0; }
+                    Util._trace('answer_accepted', {index: aiInfo.index, source: /本地/.test(from) ? 'local' : /远程/.test(from) ? 'remote' : /服务器/.test(from) ? 'server' : 'ai', hasAnswer: true});
                     if (options && options.length && kind == "choice") {
                         let aligned = Util._align_answer(String(answer), options);
                         if (aligned) answer = aligned;
@@ -3421,6 +3513,7 @@
                         td.appendChild(warnEl);
                     };
                     const filled = await attempt(2);
+                    Util._trace('fill_finished', {index: aiInfo.index, filled: Number(filled) || 0, valid: !!valid(), kind});
                     return valid() ? (opts.requireFilled ? filled || 0 : answer) : 0;
                 };
                 let cached = "";
@@ -3453,6 +3546,8 @@
                 for (let pi = 0; pi < plan.length; pi++) {
                     if (!valid()) return 0;
                     let id = plan[pi];
+                    const sourceKind = id.indexOf('ai:') === 0 ? 'ai' : ['local', 'server', 'remote'].includes(id) ? id : 'unknown';
+                    Util._trace('source_attempt', {index: aiInfo.index, source: sourceKind, sourcePosition: pi + 1});
                     // 本地题库
                     if (id == "local") {
                         if (force) { console.log("[Ulearn-Helper] 单题重试：跳过本地题库缓存"); continue; }
@@ -3523,12 +3618,14 @@
                             AiStatus();
                             return done(answer, "AI(" + (ai.name || ai.model) + ")");
                         }
+                        Util._trace('source_failed', {index: aiInfo.index, source: 'ai', outcome: diagnostics.error ? 'request' : raw ? 'parse_or_unknown' : 'empty', responseLength: String(raw || '').length});
                         noteFailure("AI(" + (ai.name || ai.model) + ") " + (diagnostics.error || (raw ? "答案格式不匹配或无法确定" : "未返回有效答案")));
                         lockTxt(lastFrom);
                         continue;
                     }
                 }
                 // 所有来源都没答案
+                Util._trace('answer_lookup_exhausted', {index: aiInfo.index, count: failures.length});
                 if (!valid()) return 0;
                 SourceConfig.maybeRotate();     // 勾了"轮询"就把顺序整体前移一位（分摊到下一个来源）
                 if (cached) return done(cached, "本地题库(存疑)");
@@ -5481,6 +5578,11 @@ function Init() {
         }
         let div = document.createElement("div");
         div.className = "ul-panel";
+        if (typeof RuntimeTrace !== 'undefined') {
+            div.setAttribute('data-ul-runtime', RuntimeTrace.instance);
+            div.setAttribute('data-ul-code-version', RuntimeTrace.codeVersion);
+            RuntimeTrace.record('panel_created', {panelCount: document.querySelectorAll('.ul-panel').length + 1});
+        }
         div.setAttribute("style", "position: fixed; top: 54px; left: 50px; width: 420px; height: 480px;");
 
         div.innerHTML = `
@@ -8461,7 +8563,7 @@ function AntiCheatProbe() {
                 questionReportStatus.textContent = ok ? '已复制题目识别诊断' : '复制失败';
             });
             wrap.appendChild(this.el('div', { class: 'ul-act-row' }, [questionReport, questionReportStatus]));
-            wrap.appendChild(this.el('div', { class: 'ul-hint', text: '题目识别诊断只读取题干、题型、材料长度和面板数量，不读取已填答案或接口配置。' }));
+            wrap.appendChild(this.el('div', { class: 'ul-hint', text: '识别诊断包含运行代码版本、实例、答案列表中的题干和最近 200 条流程日志；不读取已填答案或接口配置。控制台日志前缀为 [Ulearn-Helper][trace]。' }));
             wrap.appendChild(this.el("div", { class: "ul-hint", text: "可在设置页查看接口诊断与运行状态" }));
             wrap.appendChild(this.el("div", { class: "ul-hint", text: "ESC 关闭 · Alt+↑↓ 调序" }));
             return { el: wrap, fields: fields };
@@ -8882,9 +8984,11 @@ function Clear_Table() {
 let panelGen = 0;      // 面板刷新代号：防止上一次未完成的查询把行插进新表格
 function Get_Answer() {
     let gen = ++panelGen;
+    Util._trace('query_clicked', {generation: gen});
     Clear_Table();
     let runAll = function () {
     const questions = Util._collectQuestions();
+    Util._trace('answer_rows_started', {generation: gen, count: questions.length});
     for (const q of questions) {
         q.div._ulSeen = gen;
         if (q.kinds === 'exam') way1(q.div, gen); else way3(q.div, gen);
@@ -8908,6 +9012,7 @@ function Get_Answer() {
     // 关掉或失败时行为与以前完全一致。
     let useBatch = true;
     try { useBatch = ConfigStore.get().sources.batch !== false; } catch (e) { }
+    Util._trace('batch_prefetch_mode', {generation: gen, valid: useBatch});
     if (!useBatch) { runAll(); return; }
     try {
         let st = document.querySelector("#server_status");
@@ -8928,6 +9033,7 @@ function way3(div, gen) {
     if (gen != null && gen !== panelGen) return;                 // 同上
     answer_table && (async function () {
         let tr = answer_table.insertRow();
+        Util._traceQuestion('answer_row_created', Object.assign({div}, read), {generation: gen, stage: 'homework'});
         let t = tr.insertCell();
         const displayTitle = "【" + String(index || '').split(".")[0] + "】" + title_text;
         Util._renderPreview(t, displayTitle, Util._previewLimit('question'));
@@ -8953,6 +9059,7 @@ function way1(div, gen) {
     if (gen != null && gen !== panelGen) return;                 // 表格已被新一次查询刷新，丢弃本次结果
     answer_table && (async function () {
         let tr = answer_table.insertRow();
+        Util._traceQuestion('answer_row_created', Object.assign({div}, read), {generation: gen, stage: 'exam'});
         let t = tr.insertCell();
         const displayTitle = "【" + index + "】" + title;
         Util._renderPreview(t, displayTitle, Util._previewLimit('question'));

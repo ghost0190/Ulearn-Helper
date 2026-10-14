@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.5
-// @description  Ulearn-Helper v4.18.5：修复页面早期重复启动，强化综合题子题边界并增加只读识别诊断。
+// @version      4.18.6
+// @description  Ulearn-Helper v4.18.6：修复英语下拉填空题干、选项匹配和长 JSON 答案解析，增加答题诊断日志。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
