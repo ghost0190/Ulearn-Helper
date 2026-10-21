@@ -2,7 +2,7 @@
 
 优学院（Ulearning）Tampermonkey 脚本，提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.18.6** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.18.7** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -138,6 +138,16 @@ AI 高级配置支持自定义鉴权方式、额外请求头、请求体模板�
 检查 Tampermonkey 中实际安装版本，确认只启用一份脚本，再刷新页面。GitHub 访问失败或扩展缓存可能延迟更新。
 
 反馈时请说明脚本版本、页面类型、操作步骤和错误提示。截图或诊断内容中的密钥、Token、个人信息应先隐藏。
+
+## v4.18.7 多空题与空响应诊断
+
+- 输入框及其外层编号统一为一个 `[空N]` 标记，避免 `[1] [空1]` 重复；句末空位也按实际顺序保留。
+- 同一道题的两空、十空按输入框数量发送，明确一个空可以填写完整短语，不按英文单词数拆分。
+- 兼容逐行 `[1]`、`[2]`、冒号编号，以及键连续的逐空编号对象；保留短语空格与标点，拒绝缺号、重复编号及空值。
+- AI 返回的多空答案无法通过格式或空数校验时，每个来源在本次逐题查询中最多额外核对一次；明确无法确定、网络失败和空响应不触发该格式重试。仍不完整时不填写，显示需要和返回的空数。
+- 空响应区分输出 Token 达到上限、仅有推理过程和没有答案正文；诊断只记录状态及数量，不记录推理或答案内容。
+
+用用户提供的两份保存页验证十二道短句填空（含一道两空题）与一道十空语法填空，使用模拟答案检查逐空填写和输入事件；未调用付费 AI、修改真实考试或核实历史 AI 原始响应。因此无法仅凭保存页断言原先的空响应由哪种原因引起。
 
 ## v4.18.6 英语下拉填空与运行日志
 
