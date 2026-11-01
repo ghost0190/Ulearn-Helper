@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.7
-// @description  Ulearn-Helper v4.18.7：修复多空题位置标记与编号答案解析，增加空数校验重试和空响应诊断。
+// @version      4.18.10
+// @description  Ulearn-Helper v4.18.10：修复 Kimi 模型因 temperature 参数被拒绝的 HTTP 400 错误。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -61,11 +61,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.18.7');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.18.10');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.18.7',
+        codeVersion: '4.18.10',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
@@ -885,14 +885,24 @@
             }
             if (/^https:\/\/api\.moonshot\.(?:cn|ai)\//i.test(url) && cfg.model === 'kimi-k2.5') {
                 if (!body.thinking) body.thinking = { type:'disabled' };
-                delete body.temperature; // K2.5 使用固定采样参数，由服务端选择默认值。
             }
             if ((/^https:\/\/api\.moonshot\.(?:cn|ai)\//i.test(url) && cfg.model === 'kimi-k3')
                 || (/^https:\/\/open\.bigmodel\.cn\//i.test(url) && cfg.model === 'glm-5.3')) {
                 if (!body.reasoning_effort) body.reasoning_effort = 'low';
-                delete body.temperature;
+                if (cfg.model === 'glm-5.3') delete body.temperature;
             }
             bodyText = JSON.stringify(body);
+        }
+        // Kimi models reject the shared temperature=0 default. Apply this to JSON templates too.
+        if (tmpl || /^(?:[^/]+\/)?kimi-/i.test(String(cfg.model || ''))) {
+            try {
+                const body = JSON.parse(bodyText);
+                if (body && !Array.isArray(body) && /^(?:[^/]+\/)?kimi-/i.test(String(body.model || ''))
+                    && Object.prototype.hasOwnProperty.call(body, 'temperature') && body.temperature !== 1) {
+                    delete body.temperature;
+                    bodyText = JSON.stringify(body);
+                }
+            } catch (e) { }
         }
         return { ok: !!url && (auth === "none" || !!key), url: url, headers: headers, body: bodyText };
     };
@@ -962,13 +972,30 @@
         try { value = Number(ConfigStore.get().sources.aiConcurrency); } catch (e) { }
         return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.floor(value)) : 2;
     };
+    // 取消和失效检查不占请求间隔，也不等待正在进行的请求释放并发槽。
+    const _aiDropInvalid = function () {
+        for (let i = _aiTasks.length - 1; i >= 0; i--) {
+            const task = _aiTasks[i];
+            if (task.valid()) continue;
+            _aiTasks.splice(i, 1);
+            task.cleanup();
+            task.resolve('');
+        }
+        if (!_aiTasks.length && _aiDispatchTimer !== null) {
+            clearTimeout(_aiDispatchTimer);
+            _aiDispatchTimer = null;
+        }
+    };
     const _aiDrain = function () {
+        _aiDropInvalid();
         if (_aiDispatchTimer !== null || !_aiTasks.length || _aiActive >= _aiConcurrency()) return;
         const wait = Math.max(0, _aiGapMs() - (Date.now() - _aiLastAt));
         _aiDispatchTimer = setTimeout(function () {
             _aiDispatchTimer = null;
+            _aiDropInvalid();
             if (!_aiTasks.length || _aiActive >= _aiConcurrency()) return;
             const task = _aiTasks.shift();
+            task.cleanup();
             _aiLastAt = Date.now(); _aiActive++;
             Promise.resolve().then(task.fn).then(task.resolve, () => task.resolve('')).finally(function () {
                 _aiActive--; _aiDrain();
@@ -976,8 +1003,23 @@
             _aiDrain();
         }, wait);
     };
-    const _aiQueue = function (fn) {
-        return new Promise(resolve => { _aiTasks.push({ fn, resolve }); _aiDrain(); });
+    const _aiQueue = function (fn, opts) {
+        opts = opts || {};
+        return new Promise(resolve => {
+            const signal = opts.signal;
+            const abort = () => _aiDrain();
+            const task = {
+                fn, resolve,
+                valid() {
+                    try { return (!opts.valid || opts.valid()) && (!signal || !signal.aborted); }
+                    catch (e) { return false; }
+                },
+                cleanup() { if (signal) signal.removeEventListener('abort', abort); }
+            };
+            _aiTasks.push(task);
+            if (signal) signal.addEventListener('abort', abort, { once: true });
+            _aiDrain();
+        });
     };
     // 解析 AI 响应（纯函数）：支持自定义取值路径 + 常见各家格式 + 纯文本返回
     const parseAIResponse = function (cfg, text) {
@@ -1935,7 +1977,7 @@
             return out;
         },
         merge(items, source) {
-            let n = 0;
+            const batch = [];
             for (let i = 0; i < items.length; i++) {
                 let it = items[i];
                 if (!it || !it.title || it.answer == null) continue;
@@ -1945,9 +1987,9 @@
                     ans = Array.isArray(ans) ? ans.map(function (x) { return String(x == null ? "" : x); }).join("||") : JSON.stringify(ans);
                 }
                 if (ans == null || typeof ans == "object") continue;
-                try { Bank.save(it.title, ans, source || "远程题库", opts, it); n++; } catch (e) { }
+                batch.push(Object.assign({}, it, { answer: ans, options: opts }));
             }
-            return n;
+            return Bank.saveMany(batch, source || "远程题库");
         },
         sync(force) {
             if (this._syncWork) return this._syncWork;
@@ -2126,14 +2168,40 @@
             return n;
         },
         find(title, options, info) {
-            let bank = this._load();
+            return this._find(this._load(), title, options, info);
+        },
+        _find(bank, title, options, info) {
             let nt = this.norm(title);
             if (!nt) return "";
-            let hit = bank.map[this.key(title, options, info)];
-            if (hit && hit.a && this.key(hit.t, hit.o || [], hit) === this.key(title, options, info)) return hit.a;
+            const key = this.key(title, options, info);
+            let hit = bank.map[key];
+            if (hit && hit.a && this.key(hit.t, hit.o || [], hit) === key) return hit.a;
             return "";
         },
         save(title, answer, source, options, info) {
+            const bank = this._load();
+            if (!this._put(bank, title, answer, source, options, info)) return false;
+            this._prune(bank);
+            this._save(bank);
+            return true;
+        },
+        // 同步批次只读取、裁剪、写回一次；不缓存跨批次快照，下一次仍读取最新存储。
+        saveMany(items, source) {
+            if (!items || !items.length) return 0;
+            const bank = this._load();
+            let saved = 0;
+            for (const item of items) {
+                try {
+                    if (item && this._put(bank, item.title, item.answer, source, item.options, item)) saved++;
+                } catch (e) { } // 单条格式错误不影响其他记录；持久化失败交给调用方处理。
+            }
+            if (saved) {
+                this._prune(bank);
+                this._save(bank);
+            }
+            return saved;
+        },
+        _put(bank, title, answer, source, options, info) {
             if (!title) return;
             answer = (answer == null ? "" : String(answer)).trim();
             if (!answer || answer.length > 3000) return;
@@ -2141,7 +2209,6 @@
             title = re_text(String(title));
             if (title.length > 2000) return;
             if (!title || title === answer) return;
-            let bank = this._load();
             let k = this.key(title, options, info);
             // 同一题可能先前以"待补"记录（key 不含选项），答出后要一并清掉，否则 pendingCount 只增不减
             let pendingKey = this.key(title, []);
@@ -2152,8 +2219,7 @@
             } else {
                 bank.map[k] = { t: title, tn: this.norm(title), a: answer, s: source || "ai", ts: Date.now(), o: (options || []).slice(0, 20), m: re_text(info && info.material || ""), e: re_text(info && info.extra || ""), bl: AnswerProtocol.question(info).blanks, k: AnswerProtocol.kind(info && (info.typeName || info.quetype), [], info && (info.kind || info.k)), mu: !!(info && (info.multiple || info.mu || /多选|^2$/.test(String(info.typeName || info.quetype || '')))) };
             }
-            this._prune(bank);
-            this._save(bank);
+            return true;
         },
         // 导出本地题库（格式与后端 /admin/export 一致，可直接互相导入）
         exportJSON() {
@@ -2173,6 +2239,7 @@
         },
         _prune(bank) {
             const keys = Object.keys(bank.map);
+            if (keys.length <= this.MAX) return;
             keys.sort((a, b) => Number(!!bank.map[a].a) - Number(!!bank.map[b].a) || (bank.map[a].ts || 0) - (bank.map[b].ts || 0));
             for (let i = 0; i < keys.length - this.MAX; i++) delete bank.map[keys[i]];
         },
@@ -2190,7 +2257,8 @@
         },
         // 从 getCorrectAnswer 等接口响应里尽力收录答案
         harvest(data) {
-            let stack = [data], guard = 0, saved = 0;
+            let stack = [data], guard = 0;
+            const batch = [];
             while (stack.length && guard < 5000) {
                 let node = stack.pop();
                 guard++;
@@ -2218,15 +2286,14 @@
                     info.kind = AnswerProtocol.kind(info.quetype, options, node.kind);
                     const parsed = AnswerProtocol.parse(answer, Object.assign({}, info, { title }));
                     if (!parsed) continue;
-                    Bank.save(title, parsed, "paper", options, info);
-                    saved++;
+                    batch.push(Object.assign({}, info, { title, answer: parsed }));
                 }
                 for (let key in node) {
                     let v = node[key];
                     if (v && typeof v === "object") stack.push(v);
                 }
             }
-            return saved;
+            return this.saveMany(batch, "paper");
         },
         _normalizeAnswer(v) {
             if (v == null) return "";
@@ -2324,32 +2391,42 @@
         // GM 启动异常、手动中断和无回调超时都走同一个终态，防止串行队列永久挂起。
         request: function (options) {
             let settled = false, handle = null, timer = null;
+            let cancelTransport = false, transportAborted = false;
             const signal = options.signal;
+            const valid = function () {
+                try { return (!signal || !signal.aborted) && (!options.valid || options.valid()); }
+                catch (e) { return false; }
+            };
+            const abortTransport = function () {
+                if (transportAborted || !handle || typeof handle.abort !== 'function') return;
+                transportAborted = true;
+                try { handle.abort(); } catch (e) { }
+            };
             const finish = function (event, value) {
                 if (settled) return;
-                if (event === 'onload' && options.valid && !options.valid()) event = 'onabort';
+                if (event === 'onload' && !valid()) event = 'onabort';
                 settled = true;
                 clearTimeout(timer);
                 if (signal) signal.removeEventListener('abort', abort);
+                if (event === 'onabort' || event === 'ontimeout') {
+                    cancelTransport = true;
+                    abortTransport();
+                }
                 const callback = options[event] || (event !== 'onload' ? options.onerror : null);
                 try { if (callback) callback(value || {}); } catch (e) { console.log('[Ulearn-Helper] 请求回调异常:', String(e && e.message || e)); }
             };
-            const abort = function () {
-                finish('onabort');
-                try { if (handle && handle.abort) handle.abort(); } catch (e) {}
-            };
+            const abort = function () { finish('onabort'); };
             const req = Object.assign({}, options);
             delete req.signal; delete req.valid;
             ['onload', 'onerror', 'ontimeout', 'onabort'].forEach(event => { req[event] = value => finish(event, value); });
             const requestedTimeout = Number(options.timeout);
             req.timeout = Math.min(300000, Math.max(1000, Number.isFinite(requestedTimeout) && requestedTimeout > 0 ? requestedTimeout : 30000));
-            if (signal && signal.aborted || options.valid && !options.valid()) { finish('onabort'); return { abort }; }
+            if (!valid()) { finish('onabort'); return { abort }; }
             if (signal) signal.addEventListener('abort', abort, { once: true });
-            timer = setTimeout(function () {
-                finish('ontimeout');
-                try { if (handle && handle.abort) handle.abort(); } catch (e) {}
-            }, req.timeout + 250);
+            timer = setTimeout(function () { finish('ontimeout'); }, req.timeout + 250);
             try { handle = GM_xmlhttpRequest(req); } catch (e) { finish('onerror', { error: String(e && e.message || e) }); }
+            // GM 可能在返回句柄之前同步触发取消或超时；拿到句柄后补做一次清理。
+            if (cancelTransport) abortTransport();
             return { abort };
         },
         _renderPreview: function (host, value, limit) {
@@ -2635,13 +2712,17 @@
             }
             // 本次查询代号：排队期间用户又点了一次查询 → 这批请求直接作废（否则 50 题排队 + 再点一次 = 100 个请求）
             let myGen = panelGen;
+            const valid = function () {
+                if (myGen !== panelGen || opts.signal && opts.signal.aborted || opts.valid && !opts.valid()) {
+                    fail("已取消或被新一次查询取代，跳过");
+                    return false;
+                }
+                if ((_aiCool[aid] || 0) > Date.now()) { fail('被服务商限流，冷却中'); return false; }
+                return true;
+            };
             return _aiQueue(function () {
                 return new Promise(function (resolve) {
-                    if (myGen !== panelGen || opts.signal && opts.signal.aborted || opts.valid && !opts.valid()) {
-                        fail("已被新一次查询取代，跳过");
-                        return resolve("");
-                    }
-                    if ((_aiCool[aid] || 0) > Date.now()) { fail('被服务商限流，冷却中'); return resolve(''); }
+                    if (!valid()) return resolve("");
                     let req = buildAIRequest(cfg, prompt);
                     if (!req.ok) { fail('请求配置不完整'); return resolve(''); }
                     Util.request({
@@ -2689,7 +2770,7 @@
                         ontimeout: function () { Util._trace('ai_transport_failed', {outcome: 'timeout'}); fail("请求超时"); console.log("[Ulearn-Helper] AI 请求超时"); resolve(""); }
                     });
                 });
-            });
+            }, { signal: opts.signal, valid });
         },
         // 整卷批量提问：一次请求答完整卷
         // 逐题问 50 道题 = 50 个请求（慢、且容易被服务商当成爬虫限流）；
@@ -2832,9 +2913,16 @@
         _cacheInfo: function (q) {
             return Object.assign({}, q, { extra: q.extra || QExtra.get(q.title, q.options) });
         },
-        _cachedAnswer: function (q) {
+        _cachedAnswer: function (q, bank) {
             const info = Util._cacheInfo(q);
-            return Util.parse_ai(Bank.find(q.title, q.options, info), q.options, q.kind, q.typeName, info);
+            const answer = bank ? Bank._find(bank, q.title, q.options, info) : Bank.find(q.title, q.options, info);
+            return Util.parse_ai(answer, q.options, q.kind, q.typeName, info);
+        },
+        _uncachedQuestions: function (list) {
+            if (!list.length) return [];
+            // 每轮同步筛选共用一次读取；异步提问后的补漏轮重新读取最新题库。
+            const bank = Bank._load();
+            return list.filter(q => !Util._cachedAnswer(q, bank));
         },
         _parseBatch: function (raw, n) {
             if (typeof raw === "string" && isJunkAnswer(raw)) return {};
@@ -2870,15 +2958,16 @@
                 if (!valid()) return 0;
                 if (!raw) return 0;                                  // 失败就让逐题流程去兜底
                 let map = Util._parseBatch(raw, part.length);
-                let hit = 0;
+                const batch = [];
                 for (let k = 0; k < part.length; k++) {
                     let a = map[k + 1];
                     if (a == null) continue;
                     let ans = Util.parse_ai(a, part[k].options, part[k].kind, part[k].typeName, part[k]);
                     if (!ans) continue;
-                    try { Bank.save(part[k].title, ans, "ai", part[k].options, Util._cacheInfo(part[k])); hit++; } catch (e) { }
+                    batch.push(Object.assign({}, Util._cacheInfo(part[k]), { answer: ans }));
                 }
-                return hit;
+                if (!valid()) return 0;
+                try { return Bank.saveMany(batch, "ai"); } catch (e) { return 0; }
             })();
         },
         // 返回写入题库的条数；0 = 没做批量（调用方照常走逐题流程）
@@ -2891,7 +2980,7 @@
                 if (list.length < 2) return 0;                                   // 只有一题，没必要批量
                 for (const q of list) { if (!valid()) return 0; if (q.div) await Util._prepareBlanks(jquery(q.div), q, valid); }
                 if (!valid()) return 0;
-                let todo = list.filter(function (q) { return !Util._cachedAnswer(q); });
+                let todo = Util._uncachedQuestions(list);
                 if (!todo.length) return 0;
                 let ai = null;
                 try {
@@ -2910,7 +2999,7 @@
                 for (let c = 0; c < chunks.length; c++) { if (!valid()) return saved; saved += await Util._askBatch(ai, chunks[c], valid); }
                 // 第二轮补漏：只补第一轮没拿到的，批次更小（题目多时常有超时/限流，重来一次基本就齐了）
                 let miss = [], extra = 0;
-                if (saved) miss = todo.filter(function (q) { return !Util._cachedAnswer(q); });
+                if (saved) miss = Util._uncachedQuestions(todo);
                 if (miss.length) {
                     let again = Util._chunkQuestions(miss, 4, 1200);
                     for (let c = 0; c < again.length; c++) { if (!valid()) return saved; extra += await Util._askBatch(ai, again[c], valid); }
@@ -9141,45 +9230,33 @@ function way1(div, gen) {
 }
 //相似度匹配
 function similar(s, t, f) {
-    if (!s || !t) {
-        return 0
-    }
-    if (s === t) {
-        return 100;
-    }
-    var l = s.length > t.length ? s.length : t.length;
-    var n = s.length;
-    var m = t.length;
-    var d = [];
+    if (!s || !t) return 0;
+    if (s === t) return 100;
+    const length = Math.max(s.length, t.length);
     f = f || 2;
-    var min = function (a, b, c) {
-        return a < b ? (a < c ? a : c) : (b < c ? b : c)
-    };
-    var i, j, si, tj, cost;
-    if (n === 0) return m
-    if (m === 0) return n
-    for (i = 0; i <= n; i++) {
-        d[i] = [];
-        d[i][0] = i;
-    }
-    for (j = 0; j <= m; j++) {
-        d[0][j] = j;
-    }
-    for (i = 1; i <= n; i++) {
-        si = s.charAt(i - 1);
-        for (j = 1; j <= m; j++) {
-            tj = t.charAt(j - 1);
-            if (si === tj) {
-                cost = 0;
-            } else {
-                cost = 1;
-            }
-            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+    // 公共前后缀不影响编辑距离；分母仍使用原文长度，保持原有分数和阈值。
+    let start = 0, endS = s.length, endT = t.length;
+    while (start < endS && start < endT && s.charCodeAt(start) === t.charCodeAt(start)) start++;
+    while (endS > start && endT > start && s.charCodeAt(endS - 1) === t.charCodeAt(endT - 1)) { endS--; endT--; }
+    s = s.slice(start, endS); t = t.slice(start, endT);
+    if (s.length < t.length) [s, t] = [t, s];
+    if (!t.length) return ((1 - s.length / length) * 100).toFixed(f);
+    // 只保留较短文本的一行距离，空间从 O(n*m) 降为 O(min(n,m))。
+    const row = new Uint32Array(t.length + 1);
+    for (let j = 0; j <= t.length; j++) row[j] = j;
+    for (let i = 1; i <= s.length; i++) {
+        let diagonal = row[0];
+        row[0] = i;
+        const code = s.charCodeAt(i - 1);
+        for (let j = 1; j <= t.length; j++) {
+            const above = row[j];
+            const adjacent = (above < row[j - 1] ? above : row[j - 1]) + 1;
+            const substitution = diagonal + (code === t.charCodeAt(j - 1) ? 0 : 1);
+            row[j] = adjacent < substitution ? adjacent : substitution;
+            diagonal = above;
         }
     }
-    let res = (1 - d[n][m] / l) * 100;
-    return res.toFixed(f)
-
+    return ((1 - row[t.length] / length) * 100).toFixed(f);
 }
 //正则处理
 function re_text(text) {

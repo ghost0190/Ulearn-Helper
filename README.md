@@ -2,7 +2,7 @@
 
 优学院（Ulearning）Tampermonkey 脚本，提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.18.7** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.18.10** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -138,6 +138,20 @@ AI 高级配置支持自定义鉴权方式、额外请求头、请求体模板�
 检查 Tampermonkey 中实际安装版本，确认只启用一份脚本，再刷新页面。GitHub 访问失败或扩展缓存可能延迟更新。
 
 反馈时请说明脚本版本、页面类型、操作步骤和错误提示。截图或诊断内容中的密钥、Token、个人信息应先隐藏。
+
+## v4.18.10 Kimi 请求参数兼容
+
+- Kimi 模型请求不再发送脚本默认的 `temperature: 0`，避免服务端返回 `invalid temperature: only 1 is allowed for this model`。
+- “额外请求体”和自定义 JSON 模板中不受支持的温度值也会移除；显式设置为数字 `1` 时保留。其他模型的请求参数不变。
+- 本地模拟请求覆盖 K2.5、K2.6、K2.7、K3 和第三方接口；未使用真实 API Key 调用付费接口。
+
+## v4.18.9 查询性能与请求清理
+
+- 批量查题的每轮缓存筛选只读取一次本地题库；异步提问结束后的补漏轮重新读取，保留题型、选项、材料、补充要求及空位的完整匹配校验。
+- 文本相似度计算跳过相同的前后缀，使用单行距离数组，辅助空间从 `O(n*m)` 降为 `O(min(n,m))`，保留原有评分、精度和匹配阈值。
+- 请求有效性检查异常时立即取消；超时和取消统一清理计时器、监听器及请求句柄，处理句柄返回前的同步取消，避免重复中止或中止已完成请求。
+
+新增 17 个回归场景通过，包含 14,641 组短文本与原算法的逐一对照；现有核心、AI、缓存、配置、填写和请求测试以及 4 组隔离浏览器检查通过。3,000 条合成题库中筛选 120 道缓存题，整库读取由 120 次降为 1 次；Node VM 预热后 5 次运行的中位耗时约由 314 ms 降为 7 ms。此为本地合成测量，实际耗时受设备与题库内容影响；未调用真实 AI 或课程接口。
 
 ## v4.18.7 多空题与空响应诊断
 

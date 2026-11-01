@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.7
-// @description  Ulearn-Helper v4.18.7：修复多空题位置标记与编号答案解析，增加空数校验重试和空响应诊断。
+// @version      4.18.10
+// @description  Ulearn-Helper v4.18.10：修复 Kimi 模型因 temperature 参数被拒绝的 HTTP 400 错误。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
