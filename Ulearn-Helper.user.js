@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.10
-// @description  Ulearn-Helper v4.18.10：修复 Kimi 模型因 temperature 参数被拒绝的 HTTP 400 错误。
+// @version      4.18.11
+// @description  Ulearn-Helper v4.18.11：修复视频完成后的跳转、目录读取阻塞及学习面板定位。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -61,11 +61,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.18.10');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.18.11');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.18.10',
+        codeVersion: '4.18.11',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
@@ -1669,7 +1669,7 @@
         read(o, key, fallback) { try { const x=o && o[key]; return typeof x==='function' ? x.call(o) : x==null ? fallback : x; } catch(e) { return fallback; } },
         esc(x) { return String(x==null?'':x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); },
         state(vm) {
-            vm=vm || $w.koLearnCourseViewModel;
+            vm=vm || _ulCourseVM();
             const catalog=_ulCourseCatalog(vm), current=this.read(vm,'currentPage',null);
             const shared=typeof _ulCatalogState!=='undefined' && _ulCatalogState && _ulCatalogState.vm===vm ? _ulCatalogState : this.catalogCache && this.catalogCache.vm===vm ? this.catalogCache : null;
             const rows=(catalog?catalog.rows:[]).map((r,i)=>{
@@ -1679,7 +1679,7 @@
             });
             const completed=rows.filter(r=>r.complete).length, unknown=rows.filter(r=>!r.known).length;
             const chapters=this.read(vm && vm.course,'chapters',[]);
-            const partial=Array.isArray(chapters) && chapters.some(c=>!this.read(c,'isHide',false) && !this.read(c,'canStudy',false) && !this.read(c,'sections',[]).length);
+            const partial=!catalog || !!catalog.partial || Array.isArray(chapters) && chapters.some(c=>!this.read(c,'isHide',false) && !this.read(c,'canStudy',false) && !this.read(c,'sections',[]).length);
             let position=null;
             try { const video=_ulVideoProgress(_ulVideoNodes(),0); if(video && Number(video.d)>0)position=Math.min(100,Math.max(0,Math.round(Number(video.c||0)/Number(video.d)*100))); } catch(e) { }
             return {vm,catalog,rows,completed,unknown,partial,current,position,total:rows.length,percent:rows.length?Math.round(completed/rows.length*100):0,running:!!youxueyuan.timer,title:String(this.read(vm && vm.course,'name','课程学习进度')),message:this.message};
@@ -1756,9 +1756,10 @@
             const filtered=s.rows.filter(r=>this.filter==='completed'?r.complete:this.filter==='pending'?!r.complete:this.filter==='running'?r.active && s.running:true);
             const oldFocus=document.activeElement && this.root.contains(document.activeElement) ? document.activeElement.getAttribute('data-focus') : null;
             this.root.innerHTML=`<div class="ud-shell"><header class="ud-top"><div><div class="ud-brand">Ulearn-Helper</div><div class="ud-muted">学习工作台 · v${esc(GM_info.script.version)}</div></div><div class="ud-actions"><button data-ud="settings" data-focus="settings">设置</button><button data-ud="original" data-focus="original">返回原课件</button></div></header>
-            <h1>${esc(s.title)}</h1><div class="ud-grid"><section class="ud-card"><h2>平台确认的页面进度</h2><div class="ud-percent">${s.partial?'—':s.percent}<span class="ud-muted"> %</span></div><progress max="${Math.max(1,s.total)}" value="${s.completed}" aria-label="已完成页面比例"></progress><div class="ud-stats"><div><b>${s.completed}</b>已完成</div><div><b>${s.total-s.completed-s.unknown}</b>未完成</div><div><b>${s.unknown}</b>未读取</div><div><b>${s.total}</b>可学习页面</div></div><p class="ud-muted">依据已加载目录和平台记录。${s.partial?'目录尚未完整加载，请先在原课件打开课程目录。':s.unknown?'未读取记录不会计为已完成。':'隐藏及受限页面不计入上述总数。'}</p></section>
+            <h1>${esc(s.title)}</h1><div class="ud-grid"><section class="ud-card"><h2>平台确认的页面进度</h2><div class="ud-percent">${s.partial?'—':s.percent}<span class="ud-muted"> %</span></div><progress max="${Math.max(1,s.total)}" value="${s.completed}" aria-label="已完成页面比例"></progress><div class="ud-stats"><div><b>${s.completed}</b>已完成</div><div><b>${s.total-s.completed-s.unknown}</b>未完成</div><div><b>${s.unknown}</b>未读取</div><div><b>${s.total}</b>可学习页面</div></div><p class="ud-muted">依据已加载目录和平台记录。${s.partial?'课程目录仍在加载，进度暂不完整。':s.unknown?'未读取记录不会计为已完成。':'隐藏及受限页面不计入上述总数。'}</p></section>
             <section class="ud-card"><h2>${complete?'学习项目已完成':s.running?'正在运行':'当前任务'}</h2><div class="ud-current">${esc(current?current.title:s.total?'尚未选择具体页面':'等待课程目录加载')}</div><div class="ud-muted">${esc(current?[current.chapterTitle,current.sectionTitle].filter(Boolean).join(' / '):'可直接查看目录进度，无需逐页进入')}</div>${current && s.position!==null?`<progress max="100" value="${s.position}" aria-label="当前视频播放位置"></progress><div class="ud-muted">当前视频播放位置 ${s.position}% · 完成仍以平台记录为准</div>`:''}<div class="ud-status" role="status">${esc(complete?'所有已加载的可学习页面均已完成。':s.message)}</div><div class="ud-actions ud-footer"><button class="ud-primary" data-ud="${s.running?'pause':'start'}" data-focus="run" ${!s.total||complete?'disabled':''}>${s.running?'暂停运行':'开始运行'}</button><button data-ud="retry" data-focus="retry">重试读取进度</button></div></section></div>
-            <section class="ud-card"><h2>页面目录</h2><div class="ud-actions">${[['all','全部'],['running','运行中'],['pending','未完成'],['completed','已完成']].map(([id,name])=>`<button data-ud="filter" data-filter="${id}" data-focus="${id}" aria-pressed="${this.filter===id}" class="${this.filter===id?'ud-selected':''}">${name}</button>`).join('')}</div><div class="ud-pages">${filtered.length?filtered.slice(0,this.limit).map(r=>`<article class="ud-row"><div><div class="ud-row-title">${esc(r.title)}</div><div class="ud-muted">${esc([r.chapterTitle,r.sectionTitle].filter(Boolean).join(' / '))}</div></div><span class="ud-badge ${r.complete?'ud-done':r.active&&s.running?'ud-running':''}">${r.complete?'已完成':!r.known?'未读取':r.active&&s.running?'运行中':'未完成'}</span><button data-ud="view" data-row="${r.index}" data-focus="row-${r.index}">查看课件</button></article>`).join(''):'<div class="ud-empty">'+(s.total?'此分类暂无页面':'课程目录尚未就绪，可返回原课件选择课程。')+'</div>'}</div>${filtered.length>this.limit?'<button data-ud="more" data-focus="more">显示更多页面</button>':''}</section></div>`;
+            <section class="ud-card"><h2>页面目录</h2><div class="ud-actions">${[['all','全部'],['running','运行中'],['pending','未完成'],['completed','已完成']].map(([id,name])=>`<button data-ud="filter" data-filter="${id}" data-focus="${id}" aria-pressed="${this.filter===id}" class="${this.filter===id?'ud-selected':''}">${name}</button>`).join('')}</div><div class="ud-pages">${filtered.length?filtered.slice(0,this.limit).map(r=>`<article class="ud-row"><div><div class="ud-row-title">${esc(r.title)}</div><div class="ud-muted">${esc([r.chapterTitle,r.sectionTitle].filter(Boolean).join(' / '))}</div></div><span class="ud-badge ${r.complete?'ud-done':r.active&&s.running?'ud-running':''}">${r.complete?'已完成':!r.known?'未读取':r.active&&s.running?'运行中':'未完成'}</span><button data-ud="view" data-row="${r.index}" data-focus="row-${r.index}">查看课件</button></article>`).join(''):'<div class="ud-empty">'+(s.total?'此分类暂无页面':'课程目录加载中。')+'</div>'}</div>${filtered.length>this.limit?'<button data-ud="more" data-focus="more">显示更多页面</button>':''}</section></div>`;
+            if (!complete) this.root.querySelector('[data-ud=start]')?.removeAttribute('disabled');
             if(oldFocus){const el=Array.from(this.root.querySelectorAll('[data-focus]')).find(el=>el.getAttribute('data-focus')===oldFocus);if(el)el.focus({preventScroll:true});}
         }
     };
@@ -3838,7 +3839,8 @@
                 this._manualPaused = false;
                 this._courseFinished = false;
                 this._seekPendingOnStart = true;
-                if (!auto && typeof StudyDashboard!=='undefined' && StudyDashboard.catalogCache && StudyDashboard.catalogCache.vm===$w.koLearnCourseViewModel) {
+                if (typeof _ulPartialCatalog !== 'undefined') _ulPartialCatalog = { vm: null, route: '', since: 0 };
+                if (!auto && typeof StudyDashboard!=='undefined' && StudyDashboard.catalogCache && StudyDashboard.catalogCache.vm===_ulCourseVM()) {
                     const cache=StudyDashboard.catalogCache;cache.failures.forEach((n,s)=>cache.failures.set(s,0));cache.retryAt.clear();_ulCatalogState=cache;
                 }
                 _ulPracticeQuestions().each(function () { delete this._ulPracticeFailed; });
@@ -3859,6 +3861,10 @@
             this._manualPaused = true;
             try {
                 if (this._autoTimer) { clearTimeout(this._autoTimer); this._autoTimer = null; }
+                if (typeof _ulEndedRefresh !== 'undefined') {
+                    if (_ulEndedRefresh.controller) _ulEndedRefresh.controller.abort();
+                    _ulEndedRefresh = { page: null, eventAt: 0, readAt: 0, pending: false };
+                }
                 if (_ulPracticeController) _ulPracticeController.abort();
                 if (_ulVideoSaveController) _ulVideoSaveController.abort();
                 _ulVideoSaveState = null;
@@ -3899,7 +3905,7 @@
                     case 'statModal': {
                         // 统计页先寻找真正未完成的项目，不反复关闭末页弹窗。
                         if (_ulNavigatePending(true)) return;
-                        const vm = $w.koLearnCourseViewModel;
+                        const vm = _ulCourseVM();
                         if (vm && typeof vm.nextPageFamily === 'function' && !vm.nextPageFamily().page) {
                             this._courseFinished = true; this.stop();
                             _ulStudyState('已到课程末尾，刷课已停止；请核对课程完成进度'); return;
@@ -3933,7 +3939,7 @@
                 _ulModalStuck = 0;
             }
             // 页面模型仍在加载或已加载失败时，不能把临时空白页当成普通内容跳过。
-            const courseModel = $w.koLearnCourseViewModel;
+            const courseModel = _ulCourseVM();
             if (courseModel && typeof courseModel.currentPage === 'function') {
                 const page = courseModel.currentPage();
                 if (!page || (typeof page.isLoaded === 'function' && !page.isLoaded())) {
@@ -4053,35 +4059,77 @@
     let _ulWasPlaying = false;     // 上一轮是不是在播（用来发现"刚到暂停"）
     let _ulLastProgLog = 0;        // 进度日志节流
     let _ulModalStuck = 0;        // 认不出的弹窗连续挡了几轮（超过 5 轮就不再理它）
+    let _ulEndedRefresh = { page: null, eventAt: 0, readAt: 0, pending: false };
     let _ulLastPageTurn = 0;      // 翻页节流：别把还没渲染完的页翻过去
     let _ulLastPageTurnPage = null;
     let _ulCatalogState = null;
+    let _ulPartialCatalog = { vm: null, route: '', since: 0 };
+    function _ulCourseVM() {
+        const usable = vm => vm && typeof vm.currentPage === 'function';
+        const navigable = vm => usable(vm) && vm.course && typeof vm.selectPage === 'function';
+        return navigable($w.koLearnCourseViewModel) ? $w.koLearnCourseViewModel
+            : navigable($w.test) ? $w.test
+                : usable($w.koLearnCourseViewModel) ? $w.koLearnCourseViewModel
+                    : usable($w.test) ? $w.test : null;
+    }
     function _ulCourseCatalog(vm) {
-        try {
-            if (!vm || !vm.course || typeof vm.course.chapters !== 'function' || typeof vm.selectPage !== 'function') return null;
-            const value = (o, k) => typeof o[k] === 'function' ? o[k]() : o[k];
-            const rows = [], sections = []; let blocked = 0;
-            for (const chapter of vm.course.chapters()) {
+        if (!vm || !vm.course || typeof vm.selectPage !== 'function') return null;
+        const value = (o, k) => typeof o[k] === 'function' ? o[k].call(o) : o[k];
+        let chapters;
+        try { chapters = value(vm.course, 'chapters'); } catch (e) { return null; }
+        if (!Array.isArray(chapters)) return null;
+        const rows = [], sections = [], entries = []; let blocked = 0, partial = !chapters.length;
+        for (const chapter of chapters) {
+            let children;
+            try {
                 if (value(chapter, 'isHide')) continue;
-                for (const section of chapter.sections()) {
+                children = value(chapter, 'sections');
+            } catch (e) { partial = true; entries.push({ pendingDirectory: true }); continue; }
+            if (!Array.isArray(children) || !children.length) { partial = true; entries.push({ pendingDirectory: true }); continue; }
+            for (const section of children) {
+                let pages;
+                try {
                     if (value(section, 'isHide')) continue;
-                    if (section.canstudy || chapter.canStudy) { blocked++; continue; }
-                    const pages = section.pages().filter(page => !value(page, 'isHide'));
-                    if (pages.length) sections.push(section);
-                    for (const page of pages) rows.push({ chapter, section, page });
+                    if (value(section, 'canstudy') || value(chapter, 'canStudy')) { blocked++; continue; }
+                    pages = value(section, 'pages');
+                } catch (e) { partial = true; entries.push({ pendingDirectory: true }); continue; }
+                if (!Array.isArray(pages)) { partial = true; entries.push({ pendingDirectory: true }); continue; }
+                const visible = [];
+                for (const page of pages) {
+                    try { if (!value(page, 'isHide')) visible.push(page); }
+                    catch (e) { partial = true; }
+                }
+                if (visible.length) sections.push(section);
+                for (const page of visible) {
+                    const row = { chapter, section, page };
+                    rows.push(row); entries.push(row);
                 }
             }
-            return { rows, sections, blocked };
-        } catch (e) { return null; }
+        }
+        return { rows, sections, entries, blocked, partial };
     }
     function _ulNavigatePending(advance) {
-        const vm = $w.koLearnCourseViewModel, catalog = _ulCourseCatalog(vm);
+        const vm = _ulCourseVM(), catalog = _ulCourseCatalog(vm);
         if (!catalog) return false;
+        const route = String(location.href);
+        if (catalog.partial) {
+            if (_ulPartialCatalog.vm !== vm || _ulPartialCatalog.route !== route)
+                _ulPartialCatalog = { vm, route, since: Date.now() };
+        } else _ulPartialCatalog = { vm: null, route: '', since: 0 };
+        const nativeFallback = () => {
+            if (!advance || !catalog.partial || Date.now() - _ulPartialCatalog.since < 15000) return false;
+            try { return !!(vm.nextPageFamily && vm.nextPageFamily().page); } catch (e) { return false; }
+        };
         if (!catalog.rows.length) {
+            if (catalog.partial) {
+                const fallback = nativeFallback();
+                _ulStudyState(fallback ? '目录仍未加载，改用平台下一页' : '等待课程目录加载，暂不翻页');
+                return advance && !fallback;
+            }
             if (catalog.blocked) { youxueyuan.stop(); _ulStudyState('课程项目暂不可学习，刷课已停止'); return true; }
             return false;
         }
-        const current = vm.currentPage(), section = vm.currentSection();
+        const current = vm.currentPage(), section = typeof vm.currentSection === 'function' ? vm.currentSection() : null;
         const complete = page => { try { return Number(page.record().status()) === 1; } catch (e) { return false; } };
         const loaded = s => s && (typeof s.isRecordLoaded !== 'function' || s.isRecordLoaded())
             && !(_ulCatalogState && _ulCatalogState.vm === vm && _ulCatalogState.failures.has(s));
@@ -4090,17 +4138,42 @@
             if (!youxueyuan._seekPendingOnStart || !loaded(section)) return false;
             if (!complete(current)) { youxueyuan._seekPendingOnStart = false; return false; }
         }
-        const route = String(location.href);
         if (!_ulCatalogState || _ulCatalogState.vm !== vm || _ulCatalogState.route !== route) {
             _ulCatalogState = { vm, route, pending: new Set(), failures: new Map(), retryAt: new Map() };
         }
-        const state = _ulCatalogState, unknown = catalog.sections.filter(s => !loaded(s));
+        const state = _ulCatalogState;
+        const at = catalog.entries.findIndex(r => r.page === current);
+        const ordered = at < 0 ? catalog.entries : catalog.entries.slice(at + 1).concat(catalog.entries.slice(0, at + 1));
+        const unknown = [], seen = new Set();
+        let target = null, directoryPending = false;
+        for (const row of ordered) {
+            if (row.pendingDirectory) { directoryPending = true; break; }
+            if (advance && row.page === current) continue;
+            if (!loaded(row.section)) {
+                if (!seen.has(row.section)) { seen.add(row.section); unknown.push(row.section); }
+            } else if (!complete(row.page)) {
+                target = row;
+                break;
+            }
+        }
+        // A known pending page can be selected once every earlier section is known.
+        if (!unknown.length && target) {
+            if (target.page === current) return false;
+            const now = Date.now();
+            if (now - _ulLastPageTurn < 1500 && _ulLastPageTurnPage === current) return true;
+            _ulLastPageTurn = now; _ulLastPageTurnPage = current;
+            vm.selectPage(target.page, target.section, target.chapter);
+            _ulCourseCache = { t: 0, v: null };
+            _ulStudyState('正在直接进入未完成项目'); return true;
+        }
+        if (!unknown.length && !target && !loaded(section)) unknown.push(section);
         if (unknown.length) {
             for (const s of unknown) {
                 if (state.pending.size >= 2) break;
                 if (state.pending.has(s) || Date.now() < (state.retryAt.get(s) || 0)) continue;
                 if ((state.failures.get(s) || 0) >= 3 || typeof s.reterieveRecord !== 'function') {
-                    youxueyuan.stop(); _ulStudyState('目录完成记录读取失败，已暂停；点开始可重试'); _ulCatalogState = null; return true;
+                    _ulStudyState('目录完成记录暂不可用，改用平台下一页继续');
+                    return false;
                 }
                 state.pending.add(s);
                 let settled = false;
@@ -4114,21 +4187,18 @@
             }
             _ulStudyState('正在读取目录完成记录，直接定位未完成项目..'); return true;
         }
-        if (advance && current && typeof current.getRecord === 'function') { try { current.getRecord(); } catch (e) {} }
-        const at = catalog.rows.findIndex(r => r.page === current);
-        const ordered = at < 0 ? catalog.rows : catalog.rows.slice(at + 1).concat(catalog.rows.slice(0, at + 1));
-        // 调用方已确认当前任务完成时，不重新选回当前页；结束仍要求当前页记录也完成。
-        const target = ordered.find(r => !complete(r.page) && (!advance || r.page !== current));
-        if (target) {
-            if (target.page === current) return false;
-            const now = Date.now();
-            if (now - _ulLastPageTurn < 1500 && _ulLastPageTurnPage === current) return true;
-            _ulLastPageTurn = now; _ulLastPageTurnPage = current;
-            vm.selectPage(target.page, target.section, target.chapter);
-            _ulCourseCache = { t: 0, v: null };
-            _ulStudyState('正在直接进入未完成项目'); return true;
+        if (directoryPending) {
+            const fallback = nativeFallback();
+            _ulStudyState(fallback ? '目录仍未加载，改用平台下一页' : '等待课程目录完整加载，暂不跳过未读取章节');
+            return advance && !fallback;
         }
-        if (catalog.rows.every(r => complete(r.page))) {
+        if (advance && current && typeof current.getRecord === 'function') { try { current.getRecord(); } catch (e) {} }
+        if (catalog.partial) {
+            const fallback = nativeFallback();
+            _ulStudyState(fallback ? '目录仍未加载，改用平台下一页' : '等待课程目录完整加载，暂不判定课程结束');
+            return advance && !fallback;
+        }
+        if (catalog.rows.every(r => loaded(r.section) && complete(r.page))) {
             youxueyuan._courseFinished = true; youxueyuan.stop();
             _ulStudyState(catalog.blocked ? '当前可学习项目已完成，另有受限项目；刷课已停止' : '本课程全部学习项目已完成，刷课已停止'); return true;
         }
@@ -4142,13 +4212,25 @@
         let now = Date.now();
         let page = null, ready = false;
         try {
-            page = $w.koLearnCourseViewModel.currentPage();
+            page = _ulCourseVM().currentPage();
             ready = page && typeof page.isLoaded === 'function' && page.isLoaded()
                 && !(typeof page.loadFailed === 'function' && page.loadFailed());
         } catch (e) { }
         // 已加载的新页允许更快翻页；同一页和没有模型的页面保留防连点窗口。
         const gap = ready && _ulLastPageTurnPage && page !== _ulLastPageTurnPage ? 500 : 1500;
         if (!force && now - _ulLastPageTurn < gap) return false;
+        // The platform model can expose the next page even when its catalog tree is unavailable.
+        try {
+            const vm = _ulCourseVM();
+            const next = vm && typeof vm.nextPageFamily === 'function' && vm.nextPageFamily();
+            if (next && next.page && next.page !== page && next.section && next.chapter
+                && typeof vm.selectPage === 'function') {
+                vm.selectPage(next.page, next.section, next.chapter);
+                _ulLastPageTurn = now; _ulLastPageTurnPage = page;
+                _ulStudyState('正在进入平台下一页');
+                return true;
+            }
+        } catch (e) { console.log('[Ulearn-Helper] 平台下一页定位失败:', e); }
         const usable = function (el) {
             if (!el || el.isConnected === false || el.disabled || el.hidden) return false;
             if (el.getClientRects && !el.getClientRects().length) return false;
@@ -4292,7 +4374,7 @@
     let _ulVideoSaveState = null, _ulVideoSaveController = null;
     function _ulPlatformVideoContext() {
         try {
-            const vm = $w.koLearnCourseViewModel;
+            const vm = _ulCourseVM();
             if (!vm || typeof vm.currentPage !== 'function' || typeof vm.currentSection !== 'function') return null;
             const page = vm.currentPage(), section = vm.currentSection();
             if (!page || !section || typeof page.pageElements !== 'function' || typeof section.createRecord !== 'function') return null;
@@ -4376,9 +4458,12 @@
                         const confirmed = Array.isArray(videos) && context.videos.every(expected =>
                             videos.some(v => String(v.videoid) === expected.id && Number(v.status) === 1));
                         if (direct && confirmed) {
-                            if (!direct.valid() || Number(page.complete) !== 1 || !Array.isArray(direct.expected)
-                                || !direct.expected.every(expected => _ulSavedVideoMatches(
-                                    videos.find(v => String(v.videoid) === expected.id), expected.duration))) { finish(null, false); return; }
+                            const unique = context.videos.every(expected =>
+                                videos.filter(v => String(v.videoid) === expected.id).length === 1);
+                            if (!direct.valid() || Number(page.complete) !== 1 || !unique
+                                || (!direct.syncStatus && (!Array.isArray(direct.expected)
+                                    || !direct.expected.every(expected => _ulSavedVideoMatches(
+                                        videos.find(v => String(v.videoid) === expected.id), expected.duration))))) { finish(null, false); return; }
                             try {
                                 // 仅同步服务器读回的状态，防止平台离页保存用旧状态覆盖结果。
                                 context.page.adaptRecord(page);
@@ -4827,7 +4912,38 @@
             return;
         }
         let pg = _ulVideoProgress($v, pending);
-        if (pg.ended) { _ulStudyState('视频已结束，但平台尚未确认完成，请检查页面提示'); return; }
+        if (pg.ended) {
+            const context = _ulPlatformVideoContext();
+            const page = context && context.page;
+            if (_ulEndedRefresh.page !== page) {
+                if (_ulEndedRefresh.controller) _ulEndedRefresh.controller.abort();
+                _ulEndedRefresh = { page, eventAt: 0, readAt: 0, pending: false };
+            }
+            const now = Date.now();
+            // The platform normally completes the video in its timeupdate handler.
+            if (pg.v && now - _ulEndedRefresh.eventAt >= 3000) {
+                _ulEndedRefresh.eventAt = now;
+                try {
+                    const EventType = pg.v.ownerDocument?.defaultView?.Event || Event;
+                    pg.v.dispatchEvent(new EventType('timeupdate', { bubbles: true }));
+                } catch (e) { }
+            }
+            if (_ulVideoDone($v, pending)) { _ulAdvanceVideo($v); return; }
+            if (context && !_ulEndedRefresh.pending && now - _ulEndedRefresh.readAt >= 10000) {
+                const state = _ulEndedRefresh;
+                state.pending = true; state.readAt = now;
+                const controller = new AbortController(); state.controller = controller;
+                const current = () => !controller.signal.aborted && !youxueyuan._manualPaused && _ulEndedRefresh === state
+                    && _ulPlatformVideoContext()?.page === page;
+                _ulReadSavedVideoProgress(context, controller.signal, { valid: current, syncStatus: true })
+                    .then(confirmed => {
+                        if (confirmed && current() && _ulVideoDone($v, pending)) _ulAdvanceVideo($v);
+                    }).catch(() => {}).finally(() => {
+                        if (_ulEndedRefresh === state) { state.pending = false; state.controller = null; }
+                    });
+            }
+            _ulStudyState('视频已播放结束，等待平台确认完成记录'); return;
+        }
         let playing = !!(pg.v && !pg.v.paused && !pg.v.ended && pg.v.readyState > 2);
         // 真实倍速：mejs 在 ratechange / 切源 / play 之后会把 playbackRate 重置回 1，
         // 而它的倍速档位一般只到 2x —— 所以我们每轮都校验，不一致就当场纠正。
@@ -4982,7 +5098,7 @@
         });
         if (!completed) {
             try {
-                const vm = $w.koLearnCourseViewModel, page = vm && vm.currentPage();
+                const vm = _ulCourseVM(), page = vm && vm.currentPage();
                 completed = !!page && typeof page.record === 'function' && Number(page.record().status()) === 1
                     && page.pageElements().some(e => Number(e.type()) === 6);
             } catch (e) { }
@@ -5007,7 +5123,7 @@
     }
     function _ulAdvancePractice(why) {
         const advanced = _ulNextPage(why || '练习已完成');
-        if (youxueyuan._manualPaused || (typeof _ulCourseCatalog === 'function' && _ulCourseCatalog($w.koLearnCourseViewModel))) return advanced;
+        if (youxueyuan._manualPaused || (typeof _ulCourseCatalog === 'function' && _ulCourseCatalog(_ulCourseVM()))) return advanced;
         _ulStudyState(advanced ? '练习已完成，正在进入下一节' : '练习已完成，等待下一节按钮可用');
         return advanced;
     }
@@ -5054,7 +5170,7 @@
             const button = $submitBtn.get(0);
             if (!button || button.isConnected === false) {
                 // 自动保存练习只使用平台自己的完成计算，不伪造练习完成状态。
-                try { const page = $w.koLearnCourseViewModel.currentPage(); if (typeof page.getRecord === 'function') page.getRecord(); } catch (e) { }
+                try { const page = _ulCourseVM().currentPage(); if (typeof page.getRecord === 'function') page.getRecord(); } catch (e) { }
                 if (_ulPracticeCompleted($submitBtn)) { _ulAdvancePractice('练习自动完成'); return results.length; }
                 _ulStudyState('练习已填写，未发现提交入口，等待平台确认');
                 return 0;

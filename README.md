@@ -2,7 +2,7 @@
 
 优学院（Ulearning）Tampermonkey 脚本，提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.18.10** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.18.11** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -138,6 +138,15 @@ AI 高级配置支持自定义鉴权方式、额外请求头、请求体模板�
 检查 Tampermonkey 中实际安装版本，确认只启用一份脚本，再刷新页面。GitHub 访问失败或扩展缓存可能延迟更新。
 
 反馈时请说明脚本版本、页面类型、操作步骤和错误提示。截图或诊断内容中的密钥、Token、个人信息应先隐藏。
+
+## v4.18.11 学习导航与视频完成
+
+- 按目录顺序读取完成记录，找到第一个已确认未完成的页面即可跳转；后续章节暂未读取或读取失败，不再挡住当前目标。
+- 课程实例的公开别名可作为目录来源；单个章节异常时保留其他目录项。目录不完整时不判定课程结束，也不阻止当前视频播放。
+- 目录持续未加载或完成记录连续读取失败时，改用平台提供的下一页入口继续。学习面板在目录加载期间仍可启动，并显示进度尚未完整。
+- 视频播放到末尾但页面状态未更新时，触发平台进度事件并限时读回服务器记录；仅在平台确认完成后继续跳转。
+
+使用隔离浏览器和模拟课程记录验证目录定位、课程结束判断、视频保存与自动跳转；未操作真实课程页面。平台网络失败时仍须等待其完成记录或使用原生下一页入口。
 
 ## v4.18.10 Kimi 请求参数兼容
 

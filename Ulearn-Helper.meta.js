@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.10
-// @description  Ulearn-Helper v4.18.10：修复 Kimi 模型因 temperature 参数被拒绝的 HTTP 400 错误。
+// @version      4.18.11
+// @description  Ulearn-Helper v4.18.11：修复视频完成后的跳转、目录读取阻塞及学习面板定位。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
