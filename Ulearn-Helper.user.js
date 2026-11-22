@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.19.0
-// @description  Ulearn-Helper v4.19.0：新增智慧职教课程导航和本地学习记录。
+// @version      4.19.1
+// @description  Ulearn-Helper v4.19.1：智慧职教支持连续播放与本地题库练习。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -105,6 +105,7 @@
                 .detail{color:#41596a;overflow-wrap:anywhere}
                 button{border:1px solid #b6c9d5;background:#fff;color:#132b3c;font:inherit;padding:6px 9px;border-radius:6px;cursor:pointer}
                 button:hover{background:#e3f0f2}
+                button:disabled{opacity:.55;cursor:default}
                 button:focus-visible,a:focus-visible{outline:3px solid #087684;outline-offset:2px}
                 .toggle,.primary{background:#086873;color:#fff;border-color:#086873}
                 .toggle:hover,.primary:hover{background:#075a63}
@@ -114,6 +115,9 @@
                 li{padding:2px 0;overflow-wrap:anywhere}
                 a{color:#075b6b;text-underline-offset:2px}
                 [role=status]{margin-top:8px;color:#41596a}
+                label{display:block;margin-top:5px;overflow-wrap:anywhere}
+                fieldset{min-width:0;margin:8px 0 0;padding:6px 8px 8px;border:1px solid #b6c9d5}
+                legend{padding:0 4px;overflow-wrap:anywhere}
             `);
             const panel = element('section', '', { class: 'shell', id: 'icve-study-panel', 'aria-labelledby': 'icve-study-title', hidden: '' });
             const open = element('button', '智慧职教', {
@@ -132,11 +136,27 @@
             const tools = element('div', '', { class: 'buttons' });
             const progressSection = element('section');
             const linkSection = element('section');
+            const playbackSection = element('section');
+            const exerciseSection = element('section');
+            const playback = element('button', '连续播放本页视频', { type: 'button' });
+            const playbackStatus = element('p', '', { role: 'status' });
+            const importLabel = element('label', '导入练习题库（JSON）');
+            const importFile = element('input', '', { type: 'file', accept: '.json,application/json' });
+            const exerciseStatus = element('p', '请选择本地题库。', { role: 'status' });
+            const exercise = element('div');
+            let queue = [];
+            let activeVideo = null;
+            let playbackRoute = '';
+            let questions = [];
+            let questionIndex = 0;
             tools.append(refresh, close);
             header.append(element('h2', '学习记录', { id: 'icve-study-title' }), tools);
             progressSection.append(element('h3', '本页任务和检查点'), taskStatus, checkpoint, actions);
             linkSection.append(element('h3', '课程与章节'), courseLinks, emptyLinks);
-            panel.append(header, title, progressSection, linkSection, message);
+            playbackSection.append(element('h3', '课件播放'), playback, playbackStatus);
+            importLabel.append(importFile);
+            exerciseSection.append(element('h3', '本地练习'), importLabel, exerciseStatus, exercise);
+            panel.append(header, title, playbackSection, progressSection, linkSection, exerciseSection, message);
             shadow.append(styles, panel, open);
             document.body.append(host);
 
@@ -144,6 +164,156 @@
                 message.hidden = !text;
                 message.textContent = text;
             }
+
+            function stopPlayback(status) {
+                queue = [];
+                if (activeVideo) {
+                    activeVideo.removeEventListener('ended', playNext);
+                    activeVideo.removeEventListener('error', onPlaybackError);
+                    activeVideo.pause();
+                    activeVideo = null;
+                }
+                playback.textContent = '连续播放本页视频';
+                playbackStatus.textContent = status;
+            }
+
+            function onPlaybackError() {
+                stopPlayback('视频播放失败。请在页面播放器中检查后重试。');
+            }
+
+            async function playNext() {
+                if (activeVideo) {
+                    activeVideo.removeEventListener('ended', playNext);
+                    activeVideo.removeEventListener('error', onPlaybackError);
+                    activeVideo = null;
+                }
+                if (location.href !== playbackRoute || isAssessment(new URL(location.href))) {
+                    stopPlayback('页面已切换，连续播放已停止。');
+                    return;
+                }
+                const video = queue.shift();
+                if (!video) {
+                    stopPlayback('本页队列已播放结束。');
+                    return;
+                }
+                if (!video.isConnected || !visible(video)) {
+                    stopPlayback('课件列表已变化，请重新开始连续播放。');
+                    return;
+                }
+                activeVideo = video;
+                video.addEventListener('ended', playNext, { once: true });
+                video.addEventListener('error', onPlaybackError, { once: true });
+                playback.textContent = '停止连续播放';
+                playbackStatus.textContent = '正在播放，后续视频 ' + queue.length + ' 个。';
+                try {
+                    await video.play();
+                } catch {
+                    if (activeVideo === video) onPlaybackError();
+                }
+            }
+
+            playback.addEventListener('click', () => {
+                if (activeVideo) {
+                    stopPlayback('已停止连续播放。');
+                    return;
+                }
+                if (isAssessment(new URL(location.href))) return;
+                queue = Array.from(document.querySelectorAll('video')).filter(video => visible(video) && !video.ended);
+                if (!queue.length) {
+                    playbackStatus.textContent = '本页没有可连续播放的视频，请先打开课件。';
+                    return;
+                }
+                playbackRoute = location.href;
+                void playNext();
+            });
+
+            function loadQuestions(raw) {
+                if (!Array.isArray(raw) || raw.length === 0 || raw.length > 500) {
+                    throw new Error('题库须为包含 1–500 道题的数组。');
+                }
+                return raw.map((row, index) => {
+                    const { prompt, options, answers, explanation } = row ?? {};
+                    const validText = value => typeof value === 'string' && value.trim().length > 0;
+                    if (!validText(prompt) || !Array.isArray(options) || options.length < 2 || options.length > 12 ||
+                        !options.every(validText) || !Array.isArray(answers) || !answers.length ||
+                        new Set(answers).size !== answers.length ||
+                        !answers.every(answer => Number.isInteger(answer) && answer >= 0 && answer < options.length) ||
+                        (explanation != null && typeof explanation !== 'string')) {
+                        throw new Error('第 ' + (index + 1) + ' 题格式有误，请检查题干、选项和答案索引。');
+                    }
+                    return { prompt, options, answers: new Set(answers), explanation };
+                });
+            }
+
+            function renderQuestion() {
+                const question = questions[questionIndex];
+                const choices = element('fieldset');
+                const verify = element('button', '核对答案', { type: 'button' });
+                const next = element('button', '下一题', { type: 'button', hidden: '' });
+                const controls = element('div', '', { class: 'buttons' });
+                const groupName = 'icve-practice-answer';
+                choices.append(element('legend', question.prompt));
+                const inputs = question.options.map((option, index) => {
+                    const label = element('label');
+                    const input = element('input', '', {
+                        type: question.answers.size > 1 ? 'checkbox' : 'radio',
+                        name: groupName,
+                        value: String(index),
+                    });
+                    label.append(input, document.createTextNode(' ' + option));
+                    choices.append(label);
+                    return input;
+                });
+                const progress = '第 ' + (questionIndex + 1) + ' / ' + questions.length + ' 题';
+                exerciseStatus.textContent = progress;
+                verify.addEventListener('click', () => {
+                    const selected = inputs.filter(input => input.checked).map(input => Number(input.value));
+                    if (!selected.length) {
+                        exerciseStatus.textContent = progress + '。请先选择答案。';
+                        return;
+                    }
+                    const correct = selected.length === question.answers.size &&
+                        selected.every(answer => question.answers.has(answer));
+                    const answers = question.options.filter((_, index) => question.answers.has(index));
+                    exerciseStatus.textContent = (correct ? '回答正确。' : '参考答案：' + answers.join('、') + '。') +
+                        (question.explanation ? ' ' + question.explanation : '');
+                    choices.disabled = true;
+                    verify.disabled = true;
+                    next.hidden = false;
+                    next.textContent = questionIndex + 1 === questions.length ? '重新练习' : '下一题';
+                    next.focus();
+                });
+                next.addEventListener('click', () => {
+                    questionIndex = (questionIndex + 1) % questions.length;
+                    renderQuestion();
+                    exercise.querySelector('input').focus();
+                });
+                controls.append(verify, next);
+                exercise.replaceChildren(choices, controls);
+            }
+
+            importFile.addEventListener('change', async () => {
+                const file = importFile.files?.[0];
+                if (!file) return;
+                importFile.disabled = true;
+                try {
+                    if (file.size > 1024 * 1024) throw new Error('请选择不超过 1 MB 的 JSON 题库。');
+                    let source;
+                    try {
+                        source = JSON.parse(await file.text());
+                    } catch {
+                        throw new Error('题库读取失败，请检查文件是否为有效的 JSON。');
+                    }
+                    questions = loadQuestions(source);
+                    questionIndex = 0;
+                    renderQuestion();
+                } catch (error) {
+                    exerciseStatus.textContent = error.message;
+                } finally {
+                    importFile.value = '';
+                    importFile.disabled = false;
+                }
+            });
 
             function setExpanded(expanded) {
                 panel.hidden = !expanded;
@@ -273,6 +443,7 @@
             function onRouteChange() {
                 if (location.href === lastRoute) return;
                 lastRoute = location.href;
+                if (activeVideo) stopPlayback('页面已切换，连续播放已停止。');
                 updateRoute();
                 if (!panel.hidden) render();
             }
@@ -318,11 +489,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.19.0');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.19.1');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.19.0',
+        codeVersion: '4.19.1',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {

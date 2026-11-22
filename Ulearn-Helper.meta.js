@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.19.0
-// @description  Ulearn-Helper v4.19.0：新增智慧职教课程导航和本地学习记录。
+// @version      4.19.1
+// @description  Ulearn-Helper v4.19.1：智慧职教支持连续播放与本地题库练习。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js

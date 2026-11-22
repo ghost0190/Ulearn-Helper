@@ -2,7 +2,7 @@
 
 支持优学院（Ulearning）和智慧职教的 Tampermonkey 脚本。优学院提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。智慧职教提供课程导航和本地学习记录。
 
-当前脚本：**v4.19.0** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.19.1** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -44,11 +44,26 @@ v4.18.1 将安装名称统一为 Ulearn-Helper。如果仍显示旧名称，优�
 打开智慧职教、职教云或资源库中已适配的页面，点击右下角的「智慧职教」展开学习记录。
 
 - **课程与章节导航**：汇总当前页面可见的课程和章节链接，支持直接跳转。
+- **课件播放**：点「连续播放本页视频」，按页面顺序播放可见的原生视频。全程使用播放器原有控件和播放机制，换页时停止。
+- **本地答题练习**：导入 JSON 题库，在面板内做单选和多选题，核对答案并查看可选解析。
 - **本地任务状态**：手动开始、暂停、继续和标记完成。
 - **学习检查点**：保存记录时间与可读取的视频播放位置，返回同一页面后可以查看。
 - **测验页面**：识别到考试、作业或测验页面时收起面板。
 
 学习记录保存在当前浏览器的 Tampermonkey 脚本存储中。当前版本匹配 `ai.icve.com.cn`、`mooc.icve.com.cn`、`icve-mooc.icve.com.cn`、`zjy2.icve.com.cn` 和 `zyk.icve.com.cn`。
+
+题库按数组导入，`answers` 使用从 0 开始的选项索引。例如：
+
+```json
+[
+  {
+    "prompt": "哪个是偶数？",
+    "options": ["3", "4", "5"],
+    "answers": [1],
+    "explanation": "4 能被 2 整除。"
+  }
+]
+```
 
 ## 功能
 
