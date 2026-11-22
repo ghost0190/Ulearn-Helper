@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.19.1
-// @description  Ulearn-Helper v4.19.1：智慧职教支持连续播放与本地题库练习。
+// @version      4.20.0
+// @description  Ulearn-Helper v4.20.0：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -46,428 +46,484 @@
 
 (function () {
     "use strict";
-    function initIcve() {
-        if (window.top !== window.self) return;
+    const IS_ICVE = /^(?:ai|mooc|icve-mooc|zjy2|zyk)\.icve\.com\.cn$/.test(location.hostname);
 
-        const routes = /course|chapter|lesson|courseware|learn|study/i;
-        const assessment = /(?:^|[/#?&_.-])(?:exam|homework|test|quiz|paper|answer)(?:[/#?&=_.-]|$)/i;
-        const identifiers = /^(?:course(?:Info)?Id|classId|chapterId|sectionId|itemId|lessonId|cellId|resourceId)$/i;
-        const states = { idle: '待开始', running: '记录中', paused: '已暂停', completed: '已完成' };
-        const taskActions = {
-            idle: [['开始记录', 'running']],
-            running: [['暂停记录', 'paused'], ['标记完成', 'completed']],
-            paused: [['继续记录', 'running'], ['标记完成', 'completed']],
-            completed: [['重新开始', 'running']],
+    // BEGIN ICVE STUDY ADAPTER
+    function createIcveStudy(env) {
+    const doc = env.document, win = env.window;
+    const questionRoots = '.content-item, .subjectDet, .q_content';
+    const optionSelectors = ['label[class*="group-item"]', '.optionList > div', '.questionOptions .q_option', '.option-item'];
+    const ignored = '.ul-panel, .ul-ovl, #ul-dashboard';
+    let revision = 0, courseKey = '', directory = null, chapters = [], rows = [], partial = true;
+    let pages = new Map(), sections = new Map(), loads = new Map(), loading = null;
+    let activeId = '', task = null, nextAt = 0, observedRoute = '', lastSync = 0;
+    let nativeNodes = new Map(), completedIds = null;
+    let seekPending = false;
+    let legacyDirectory = { substanceList: [] };
+    const ownedMedia = new Set();
+    const clean = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    const visible = el => !!(el && el.isConnected && el.getClientRects().length &&
+        el.ownerDocument.defaultView.getComputedStyle(el).visibility !== 'hidden');
+    const vmOf = el => {
+        for (let depth = 0; el && depth < 7; depth++, el = el.parentElement) {
+            if (el.__vue__ && !el.__vue__._isDestroyed) return el.__vue__;
+        }
+        return null;
+    };
+    function documents() {
+        const out = [doc];
+        for (let i = 0; i < out.length && i < 10; i++) for (const frame of out[i].querySelectorAll('iframe')) {
+            try { if (visible(frame) && frame.contentDocument && !out.includes(frame.contentDocument) && out.length < 10) out.push(frame.contentDocument); } catch (e) { }
+        }
+        return out;
+    }
+    function queryAll(selector) { return documents().flatMap(scope => Array.from(scope.querySelectorAll(selector))); }
+    function folderNode(load) {
+        for (const scope of documents()) { const el = scope.getElementById(load.id); if (el) return el; }
+        const title = clean((load.item.levelName || '') + (load.item.name || ''));
+        return queryAll('.coursePreviewIndex .items').find(el => clean(el.textContent).replace(/\s/g, '') === title.replace(/\s/g, ''));
+    }
+    function findVM(selector, accept) {
+        for (const node of queryAll(selector)) {
+            let vm = vmOf(node);
+            for (let depth = 0; vm && depth < 7; depth++, vm = vm.$parent) if (accept(vm)) return vm;
+        }
+        return null;
+    }
+    function assessment(url) {
+        let path;
+        try { const u = new URL(url || win.location.href); path = u.pathname + u.hash.split('?')[0]; }
+        catch (e) { path = String(url || ''); }
+        return /(?:^|[/#_.-])(?:preview-exam|review-exam|exam|homework|test|quiz|paper|answer|work)(?:[/#_.-]|$)/i.test(path);
+    }
+    function study(url) {
+        const u = String(url || win.location.href);
+        if (assessment(u)) return false;
+        // A catalogue/preview route alone is insufficient to start playing resources.
+        return /\/excellent-study\/|\/learnspace\/learn\//i.test(u) || /\/(?:study|learning|coursePreview|coursePreviewIndex|classroomNow|guide|teach)(?:[/?.#]|$)/i.test(u);
+    }
+    function identity(dir) {
+        const route = dir && dir.$route, params = route && route.params || {};
+        let u;
+        try { u = new URL(win.location.href); } catch (e) { return ''; }
+        const ids = ['courseInfoId', 'courseId', 'classId', 'openClassId'].map(k => clean(params[k] || dir && dir[k] || u.searchParams.get(k)));
+        if (!ids.some(Boolean)) {
+            const hash = u.hash.split('?')[0];
+            return u.origin + (hash || u.pathname).replace(/\/(?:kcnr|courseware)\/?$/, '');
+        }
+        return u.origin + '|' + ids.join('|');
+    }
+    function pauseMedia() {
+        for (const media of ownedMedia) {
+            try { if (media.isConnected && !media.paused) media.pause(); } catch (e) { }
+        }
+        ownedMedia.clear();
+    }
+    function stop() {
+        if (task && task.media) checkpoint(task.media, true);
+        revision++;
+        if (task && task.controller) task.controller.abort();
+        task = null;
+        pauseMedia();
+    }
+    function reset(key, dir) {
+        const changed = !!courseKey && key !== courseKey;
+        stop(); courseKey = key; directory = dir;
+        pages = new Map(); sections = new Map(); loads = new Map(); loading = null;
+        chapters = []; rows = []; partial = true; activeId = ''; nextAt = 0;
+        if (changed && env.running()) env.halt('课程已切换，请确认新课程后开始');
+    }
+    function nodeFor(id) {
+        return nativeNodes.get(String(id)) || null;
+    }
+    function completion(item, dir) {
+        if (completedIds) return { known: true, complete: completedIds.has(String(item.id)) };
+        const el = nodeFor(item.id);
+        if (el && el.querySelector('i.jd')) return { known: true, complete: !!el.querySelector('i.jd.wc') };
+        // Legacy progress is only trusted when the platform explicitly provides it.
+        for (const key of ['stuProcess', 'studyPercent', 'studentProgress']) {
+            const raw = item[key];
+            if (raw !== '' && raw != null && Number.isFinite(Number(raw))) return { known: true, complete: Number(raw) >= 100 };
+        }
+        if (el && el.matches('.s_point[itemtype]')) return { known: true, complete: !!el.querySelector('.done_icon_show') };
+        if (el && el.querySelector('.done_icon_show')) return { known: true, complete: true };
+        return { known: false, complete: false };
+    }
+    function typeOf(item) {
+        const n = Number(item.nrlx), file = clean(item.fileType).toLowerCase();
+        if ([2, 11].includes(n) || /^(?:media|video|audio|mp4|mp3|m3u8|wav|视频|音频)$/.test(file)) return 'media';
+        if ([4, 5, 6].includes(n) || /^(?:exam|quiz|work)$/.test(file) || /作业|测验|考试|练习/.test(file)) return 'practice';
+        if ([7, 15].includes(n) || /讨论|任务/.test(file)) return 'manual';
+        if ([1, 3, 12, 13].includes(n) || /^(?:office|pptx?|docx?|pdf|text|image|pic|文档|图片|文本)$/.test(file)) return 'document';
+        return 'unknown';
+    }
+    function currentResource() {
+        const content = findVM('.contentBox, .guide, .teach', vm => vm.nrdata || vm.cellData || vm.currentCell);
+        const item = content && (content.nrdata || content.cellData || content.currentCell);
+        const active = queryAll('.panelList .node.active, .s_point.s_pointerct')[0];
+        if (item && item.id) return String(item.id);
+        if (active) {
+            for (const [id, node] of nativeNodes) if (node === active) return id;
+        }
+        let u;
+        try { u = new URL(win.location.href); } catch (e) { return ''; }
+        return clean(directory && directory.iviewNr && directory.iviewNr.id || u.searchParams.get('cellId') || u.searchParams.get('id'));
+    }
+    function sync(force) {
+        const now = Date.now(), route = win.location.href;
+        if (!force && route === observedRoute && now - lastSync < 350) return;
+        const leftStudy = observedRoute && study(observedRoute) && !study(route);
+        observedRoute = route; lastSync = now;
+        if (leftStudy) { stop(); if (env.running()) env.halt('已离开课件页，学习已暂停'); }
+        let dir = findVM('#kcnr, .coursePreviewIndex', vm => Array.isArray(vm.substanceList) || Array.isArray(vm.list));
+        const moocNodes = dir ? [] : queryAll('.s_point[itemtype]');
+        if (!dir && moocNodes.length) {
+            legacyDirectory.substanceList = moocNodes.map((el, i) => ({ id: el.id || el.getAttribute('itemid') || 'mooc-' + i,
+                name: el.title || el.querySelector('.s_pointti')?.title || clean(el.textContent), fileType: el.getAttribute('itemtype'),
+                nativeNode: el }));
+            dir = legacyDirectory;
+        }
+        if (!dir && study() && mediaNodes().length) {
+            const u = new URL(win.location.href), media = mediaNodes()[0];
+            const id = u.searchParams.get('cellId') || u.searchParams.get('id') || 'current-page-media';
+            legacyDirectory.substanceList = [{ id, name: doc.title || '当前页媒体', nrlx: media.tagName === 'AUDIO' ? 11 : 2 }];
+            legacyDirectory.iviewNr = { id };
+            dir = legacyDirectory;
+        }
+        const key = identity(dir);
+        if (key !== courseKey || directory && dir && directory !== dir) reset(key, dir);
+        directory = dir;
+        nativeNodes = new Map(queryAll('.panelList .node, .coursePreviewIndex [id], .h_cells a')
+            .map(el => [String(el.id || el.getAttribute('data-id')), el]));
+        completedIds = Array.isArray(dir && dir.studyCourseware) ? new Set(dir.studyCourseware.map(String)) : null;
+        const namedLegacyNodes = new Map(queryAll('.coursePreviewIndex .fIteml, .coursePreviewIndex .iChild, .coursePreviewIndex .items')
+            .map(el => [clean(el.textContent).replace(/\s/g, ''), el]));
+        const list = dir && (dir.substanceList || dir.list);
+        rows = []; chapters = []; partial = !Array.isArray(list) || !list.length;
+        if (!Array.isArray(list)) return;
+        const visited = new Set();
+        const walk = (items, title, chapterSections, path, depth) => {
+            if (depth > 12 || visited.size > 3000) { partial = true; return; }
+            for (const item of items) {
+                if (!item || !item.id || visited.has(String(item.id))) continue;
+                visited.add(String(item.id));
+                const id = String(item.id), name = clean(item.name || item.title || '未命名资源');
+                const children = Array.isArray(item.children) ? item.children : [];
+                if (item.nativeNode) nativeNodes.set(id, item.nativeNode);
+                if (!nativeNodes.has(id) && dir !== legacyDirectory) {
+                    const expected = clean((item.levelName || '') + name).replace(/\s/g, '');
+                    const native = namedLegacyNodes.get(expected);
+                    if (native) nativeNodes.set(id, native);
+                }
+                const resource = Number(item.nrlx) > 0 || !!item.fileType && !/^(?:folder|chapter|目录|章节|节点|父节点|子节点)$/i.test(item.fileType);
+                if (!resource) {
+                    if (children.length) walk(children, name, chapterSections, path.concat(name), depth + 1);
+                    else {
+                        partial = true;
+                        let load = loads.get(id);
+                        if (!load) { load = { id, item, attempts: 0, retryAt: 0, done: false }; loads.set(id, load); }
+                        load.item = item; load.seen = true;
+                        chapterSections.push({ name: () => name, pages: () => null });
+                    }
+                    continue;
+                }
+                const status = completion(item, dir);
+                let page = pages.get(id);
+                if (!page) {
+                    page = { id: () => id, name: () => page.title, record: () => ({ status: () => page.complete ? 1 : 0 }) };
+                    pages.set(id, page);
+                }
+                Object.assign(page, { raw: item, title: name, known: status.known, complete: status.complete, type: typeOf(item) });
+                let section = sections.get(id);
+                if (!section) {
+                    section = { name: () => section.title, pages: () => [page], isRecordLoaded: () => page.known };
+                    sections.set(id, section);
+                }
+                section.title = path.join(' / ') || title;
+                chapterSections.push(section);
+                rows.push({ page, section, chapter: null });
+            }
         };
-
-        function pageIdentity(url) {
-            const hash = url.hash.startsWith('#/') ? new URL(url.origin + url.hash.slice(1)) : null;
-            function idQuery(params) {
-                const ids = Array.from(params).filter(([key, value]) => identifiers.test(key) && /^[\w-]{1,128}$/.test(value));
-                return new URLSearchParams(ids.sort()).toString();
-            }
-            return JSON.stringify([url.origin, url.pathname, idQuery(url.searchParams),
-                hash?.pathname || '', hash ? idQuery(hash.searchParams) : '']);
+        for (const load of loads.values()) load.seen = false;
+        for (const item of list) {
+            const chapterSections = [], title = clean(item.name || item.title || '课程内容');
+            const start = rows.length;
+            walk([item], title, chapterSections, [], 0);
+            const chapter = { name: () => title, sections: () => chapterSections };
+            chapters.push(chapter);
+            for (let i = start; i < rows.length; i++) rows[i].chapter = chapter;
         }
-
-        function isAssessment(url) {
-            const route = url.pathname + url.search + url.hash;
-            return assessment.test(route) || /(?:exam|homework|paper|test|quiz)(?:Id|Detail|Preview|View|Result|List|Center)/i.test(route);
-        }
-
-        function element(tag, text, attributes = {}) {
-            const node = document.createElement(tag);
-            if (text) node.textContent = text;
-            for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
-            return node;
-        }
-
-        function visible(node) {
-            return node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
-        }
-
-        function mount() {
-            if (document.getElementById('ulearn-icve')) return;
-            const host = element('div', '', { id: 'ulearn-icve' });
-            const shadow = host.attachShadow({ mode: 'open' });
-            const styles = element('style', `
-                :host{all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483646;color-scheme:light}
-                *{box-sizing:border-box}
-                :host([hidden]),[hidden]{display:none!important}
-                .shell{width:min(344px,calc(100vw - 32px));max-height:calc(100dvh - 92px);overflow:auto;background:#f5f9fc;color:#132b3c;border:1px solid #b6c9d5;border-top:4px solid #086873;border-radius:12px;box-shadow:0 9px 32px #132b3c26;padding:16px;margin-bottom:9px;font:14px/1.5 "Inter","Microsoft YaHei",system-ui,sans-serif}
-                header,.buttons{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-                header{justify-content:space-between;flex-wrap:nowrap}
-                h2,h3,p{margin:0}
-                h2{font-size:18px}
-                h3{font-size:14px}
-                section{border-top:1px solid #d3dfe7;margin-top:12px;padding-top:10px}
-                .current{margin-top:8px;font-weight:650;overflow-wrap:anywhere}
-                .detail{color:#41596a;overflow-wrap:anywhere}
-                button{border:1px solid #b6c9d5;background:#fff;color:#132b3c;font:inherit;padding:6px 9px;border-radius:6px;cursor:pointer}
-                button:hover{background:#e3f0f2}
-                button:disabled{opacity:.55;cursor:default}
-                button:focus-visible,a:focus-visible{outline:3px solid #087684;outline-offset:2px}
-                .toggle,.primary{background:#086873;color:#fff;border-color:#086873}
-                .toggle:hover,.primary:hover{background:#075a63}
-                .toggle{display:block;margin-left:auto;box-shadow:0 3px 14px #132b3c35}
-                .buttons{margin-top:8px}
-                ol{margin:6px 0 0;padding-left:22px;max-height:150px;overflow:auto}
-                li{padding:2px 0;overflow-wrap:anywhere}
-                a{color:#075b6b;text-underline-offset:2px}
-                [role=status]{margin-top:8px;color:#41596a}
-                label{display:block;margin-top:5px;overflow-wrap:anywhere}
-                fieldset{min-width:0;margin:8px 0 0;padding:6px 8px 8px;border:1px solid #b6c9d5}
-                legend{padding:0 4px;overflow-wrap:anywhere}
-            `);
-            const panel = element('section', '', { class: 'shell', id: 'icve-study-panel', 'aria-labelledby': 'icve-study-title', hidden: '' });
-            const open = element('button', '智慧职教', {
-                type: 'button', class: 'toggle', 'aria-expanded': 'false', 'aria-controls': panel.id,
-            });
-            const close = element('button', '收起', { type: 'button' });
-            const refresh = element('button', '刷新', { type: 'button' });
-            const title = element('p', '', { class: 'current' });
-            const taskStatus = element('p', '', { class: 'detail' });
-            const checkpoint = element('p', '', { class: 'detail' });
-            const courseLinks = element('ol', '', { 'aria-label': '当前页面课程和章节链接' });
-            const emptyLinks = element('p', '当前页面没有识别到可见的课程或章节链接。', { class: 'detail' });
-            const message = element('p', '', { role: 'status', hidden: '' });
-            const actions = element('div', '', { class: 'buttons' });
-            const header = element('header');
-            const tools = element('div', '', { class: 'buttons' });
-            const progressSection = element('section');
-            const linkSection = element('section');
-            const playbackSection = element('section');
-            const exerciseSection = element('section');
-            const playback = element('button', '连续播放本页视频', { type: 'button' });
-            const playbackStatus = element('p', '', { role: 'status' });
-            const importLabel = element('label', '导入练习题库（JSON）');
-            const importFile = element('input', '', { type: 'file', accept: '.json,application/json' });
-            const exerciseStatus = element('p', '请选择本地题库。', { role: 'status' });
-            const exercise = element('div');
-            let queue = [];
-            let activeVideo = null;
-            let playbackRoute = '';
-            let questions = [];
-            let questionIndex = 0;
-            tools.append(refresh, close);
-            header.append(element('h2', '学习记录', { id: 'icve-study-title' }), tools);
-            progressSection.append(element('h3', '本页任务和检查点'), taskStatus, checkpoint, actions);
-            linkSection.append(element('h3', '课程与章节'), courseLinks, emptyLinks);
-            playbackSection.append(element('h3', '课件播放'), playback, playbackStatus);
-            importLabel.append(importFile);
-            exerciseSection.append(element('h3', '本地练习'), importLabel, exerciseStatus, exercise);
-            panel.append(header, title, playbackSection, progressSection, linkSection, exerciseSection, message);
-            shadow.append(styles, panel, open);
-            document.body.append(host);
-
-            function announce(text) {
-                message.hidden = !text;
-                message.textContent = text;
-            }
-
-            function stopPlayback(status) {
-                queue = [];
-                if (activeVideo) {
-                    activeVideo.removeEventListener('ended', playNext);
-                    activeVideo.removeEventListener('error', onPlaybackError);
-                    activeVideo.pause();
-                    activeVideo = null;
-                }
-                playback.textContent = '连续播放本页视频';
-                playbackStatus.textContent = status;
-            }
-
-            function onPlaybackError() {
-                stopPlayback('视频播放失败。请在页面播放器中检查后重试。');
-            }
-
-            async function playNext() {
-                if (activeVideo) {
-                    activeVideo.removeEventListener('ended', playNext);
-                    activeVideo.removeEventListener('error', onPlaybackError);
-                    activeVideo = null;
-                }
-                if (location.href !== playbackRoute || isAssessment(new URL(location.href))) {
-                    stopPlayback('页面已切换，连续播放已停止。');
-                    return;
-                }
-                const video = queue.shift();
-                if (!video) {
-                    stopPlayback('本页队列已播放结束。');
-                    return;
-                }
-                if (!video.isConnected || !visible(video)) {
-                    stopPlayback('课件列表已变化，请重新开始连续播放。');
-                    return;
-                }
-                activeVideo = video;
-                video.addEventListener('ended', playNext, { once: true });
-                video.addEventListener('error', onPlaybackError, { once: true });
-                playback.textContent = '停止连续播放';
-                playbackStatus.textContent = '正在播放，后续视频 ' + queue.length + ' 个。';
-                try {
-                    await video.play();
-                } catch {
-                    if (activeVideo === video) onPlaybackError();
-                }
-            }
-
-            playback.addEventListener('click', () => {
-                if (activeVideo) {
-                    stopPlayback('已停止连续播放。');
-                    return;
-                }
-                if (isAssessment(new URL(location.href))) return;
-                queue = Array.from(document.querySelectorAll('video')).filter(video => visible(video) && !video.ended);
-                if (!queue.length) {
-                    playbackStatus.textContent = '本页没有可连续播放的视频，请先打开课件。';
-                    return;
-                }
-                playbackRoute = location.href;
-                void playNext();
-            });
-
-            function loadQuestions(raw) {
-                if (!Array.isArray(raw) || raw.length === 0 || raw.length > 500) {
-                    throw new Error('题库须为包含 1–500 道题的数组。');
-                }
-                return raw.map((row, index) => {
-                    const { prompt, options, answers, explanation } = row ?? {};
-                    const validText = value => typeof value === 'string' && value.trim().length > 0;
-                    if (!validText(prompt) || !Array.isArray(options) || options.length < 2 || options.length > 12 ||
-                        !options.every(validText) || !Array.isArray(answers) || !answers.length ||
-                        new Set(answers).size !== answers.length ||
-                        !answers.every(answer => Number.isInteger(answer) && answer >= 0 && answer < options.length) ||
-                        (explanation != null && typeof explanation !== 'string')) {
-                        throw new Error('第 ' + (index + 1) + ' 题格式有误，请检查题干、选项和答案索引。');
-                    }
-                    return { prompt, options, answers: new Set(answers), explanation };
-                });
-            }
-
-            function renderQuestion() {
-                const question = questions[questionIndex];
-                const choices = element('fieldset');
-                const verify = element('button', '核对答案', { type: 'button' });
-                const next = element('button', '下一题', { type: 'button', hidden: '' });
-                const controls = element('div', '', { class: 'buttons' });
-                const groupName = 'icve-practice-answer';
-                choices.append(element('legend', question.prompt));
-                const inputs = question.options.map((option, index) => {
-                    const label = element('label');
-                    const input = element('input', '', {
-                        type: question.answers.size > 1 ? 'checkbox' : 'radio',
-                        name: groupName,
-                        value: String(index),
-                    });
-                    label.append(input, document.createTextNode(' ' + option));
-                    choices.append(label);
-                    return input;
-                });
-                const progress = '第 ' + (questionIndex + 1) + ' / ' + questions.length + ' 题';
-                exerciseStatus.textContent = progress;
-                verify.addEventListener('click', () => {
-                    const selected = inputs.filter(input => input.checked).map(input => Number(input.value));
-                    if (!selected.length) {
-                        exerciseStatus.textContent = progress + '。请先选择答案。';
-                        return;
-                    }
-                    const correct = selected.length === question.answers.size &&
-                        selected.every(answer => question.answers.has(answer));
-                    const answers = question.options.filter((_, index) => question.answers.has(index));
-                    exerciseStatus.textContent = (correct ? '回答正确。' : '参考答案：' + answers.join('、') + '。') +
-                        (question.explanation ? ' ' + question.explanation : '');
-                    choices.disabled = true;
-                    verify.disabled = true;
-                    next.hidden = false;
-                    next.textContent = questionIndex + 1 === questions.length ? '重新练习' : '下一题';
-                    next.focus();
-                });
-                next.addEventListener('click', () => {
-                    questionIndex = (questionIndex + 1) % questions.length;
-                    renderQuestion();
-                    exercise.querySelector('input').focus();
-                });
-                controls.append(verify, next);
-                exercise.replaceChildren(choices, controls);
-            }
-
-            importFile.addEventListener('change', async () => {
-                const file = importFile.files?.[0];
-                if (!file) return;
-                importFile.disabled = true;
-                try {
-                    if (file.size > 1024 * 1024) throw new Error('请选择不超过 1 MB 的 JSON 题库。');
-                    let source;
-                    try {
-                        source = JSON.parse(await file.text());
-                    } catch {
-                        throw new Error('题库读取失败，请检查文件是否为有效的 JSON。');
-                    }
-                    questions = loadQuestions(source);
-                    questionIndex = 0;
-                    renderQuestion();
-                } catch (error) {
-                    exerciseStatus.textContent = error.message;
-                } finally {
-                    importFile.value = '';
-                    importFile.disabled = false;
-                }
-            });
-
-            function setExpanded(expanded) {
-                panel.hidden = !expanded;
-                open.setAttribute('aria-expanded', String(expanded));
-            }
-
-            function updateRoute() {
-                host.hidden = isAssessment(new URL(location.href));
-                if (host.hidden) setExpanded(false);
-            }
-
-            function storageKey() {
-                return 'icve-study-v1:' + pageIdentity(new URL(location.href));
-            }
-
-            function read(key) {
-                const saved = GM_getValue(key, null);
-                return {
-                    state: Object.hasOwn(states, saved?.state) ? saved.state : 'idle',
-                    checkpoint: Number.isFinite(saved?.checkpoint?.time) ? saved.checkpoint : null,
-                };
-            }
-
-            function record(action) {
-                if (isAssessment(new URL(location.href))) {
-                    updateRoute();
-                    return;
-                }
-                try {
-                    const key = storageKey();
-                    const saved = read(key);
-                    if (action === 'save') {
-                        const video = Array.from(document.querySelectorAll('video')).find(visible);
-                        const second = video && Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : null;
-                        saved.checkpoint = { time: Date.now(), second };
-                    } else if (taskActions[saved.state].some(([, target]) => target === action)) {
-                        saved.state = action;
-                    } else {
-                        renderProgress();
-                        return;
-                    }
-                    GM_setValue(key, saved);
-                    renderProgress();
-                    announce(action === 'save' ? '已保存本页学习检查点。' : '本页任务状态已更新。');
-                } catch {
-                    announce('本地记录保存失败，请检查油猴存储权限。');
-                }
-            }
-
-            function renderProgress() {
-                const saved = read(storageKey());
-                taskStatus.textContent = '本地状态：' + states[saved.state];
-                checkpoint.textContent = saved.checkpoint
-                    ? '上次记录：' + new Date(saved.checkpoint.time).toLocaleString('zh-CN')
-                    : '本页尚无学习检查点';
-                if (Number.isFinite(saved.checkpoint?.second)) {
-                    checkpoint.textContent += ' · 视频 ' + saved.checkpoint.second + ' 秒';
-                }
-                const buttons = [...taskActions[saved.state], ['保存检查点', 'save']].map(([label, action], index) => {
-                    const button = element('button', label, { type: 'button', 'data-action': action });
-                    if (index === 0) button.classList.add('primary');
-                    button.addEventListener('click', () => record(action));
-                    return button;
-                });
-                const hadFocus = actions.contains(shadow.activeElement);
-                actions.replaceChildren(...buttons);
-                if (hadFocus) buttons[0].focus();
-            }
-
-            function render() {
-                announce('');
-                title.textContent = (document.querySelector('h1')?.textContent.trim() || document.title || '当前学习页面').slice(0, 140);
-                try {
-                    renderProgress();
-                } catch {
-                    actions.replaceChildren();
-                    taskStatus.textContent = '无法读取本地任务';
-                    checkpoint.textContent = '';
-                    announce('请检查油猴存储权限。');
-                }
-
-                const links = new Map();
-                for (const node of document.querySelectorAll('a[href]')) {
-                    let url;
-                    try { url = new URL(node.href, location.href); } catch { continue; }
-                    if (!url || url.origin !== location.origin || isAssessment(url)) continue;
-                    if (!routes.test(url.pathname + url.hash.split('?')[0]) && !Array.from(url.searchParams.keys()).some(key => identifiers.test(key))) continue;
-                    const label = (node.innerText || node.textContent).trim().replace(/\s+/g, ' ').slice(0, 95);
-                    if (!label || !visible(node)) continue;
-                    const key = pageIdentity(url);
-                    if (!links.has(key)) links.set(key, { href: url.href, label });
-                    if (links.size === 30) break;
-                }
-                const items = Array.from(links.values(), ({ href, label }) => {
-                    const item = element('li');
-                    item.append(element('a', label, { href }));
-                    return item;
-                });
-                courseLinks.replaceChildren(...items);
-                courseLinks.hidden = items.length === 0;
-                emptyLinks.hidden = items.length > 0;
-            }
-
-            open.addEventListener('click', () => {
-                if (isAssessment(new URL(location.href))) {
-                    updateRoute();
-                    return;
-                }
-                setExpanded(panel.hidden);
-                if (!panel.hidden) {
-                    render();
-                    close.focus();
-                }
-            });
-            close.addEventListener('click', () => {
-                setExpanded(false);
-                open.focus();
-            });
-            refresh.addEventListener('click', render);
-            panel.addEventListener('keydown', event => {
-                if (event.key === 'Escape') {
-                    event.stopPropagation();
-                    close.click();
-                }
-            });
-            let lastRoute = location.href;
-            function onRouteChange() {
-                if (location.href === lastRoute) return;
-                lastRoute = location.href;
-                if (activeVideo) stopPlayback('页面已切换，连续播放已停止。');
-                updateRoute();
-                if (!panel.hidden) render();
-            }
-            updateRoute();
-            window.addEventListener('hashchange', onRouteChange);
-            window.addEventListener('popstate', onRouteChange);
-            window.setInterval(onRouteChange, 1000);
-        }
-
-        if (document.body) mount();
-        else document.addEventListener('DOMContentLoaded', mount, { once: true });
+        for (const [id, load] of loads) if (!load.seen) loads.delete(id);
+        activeId = currentResource();
     }
-
-    const icveHosts = new Set([
-        'ai.icve.com.cn',
-        'mooc.icve.com.cn',
-        'icve-mooc.icve.com.cn',
-        'zjy2.icve.com.cn',
-        'zyk.icve.com.cn',
-    ]);
-    if (icveHosts.has(location.hostname)) {
-        initIcve();
-        return;
+    function loadDirectory(retry) {
+        sync(); settleLoad();
+        if (retry) for (const load of loads.values()) { load.attempts = 0; load.retryAt = 0; }
+        if (!study() || !directory || loading || !loads.size) return;
+        const now = Date.now(), load = Array.from(loads.values()).find(x => x.attempts < 3 && x.retryAt <= now);
+        if (!load) return;
+        const generation = revision;
+        load.attempts++; load.retryAt = now + 10000;
+        loading = { load, generation, since: now };
+        env.say('正在读取目录：' + clean(load.item.name || '章节') + '（' + load.attempts + '/3）');
+        try {
+            const folder = folderNode(load);
+            const arrow = folder && folder.querySelector('.one-title .jiantou, .two-title .jiantou, .three-title .jiantou');
+            const toggle = arrow || folder && (folder.matches('.items') ? folder : folder.querySelector('.panel-title, .el-tree-node__expand-icon:not(.expanded)'));
+            // The native loader only reads the directory when called without create/first-selection arguments.
+            if (arrow) {
+                if (load.item.show) arrow.click();
+                arrow.click();
+            } else if (typeof directory.getCellList === 'function' && !load.item.show) {
+                const result = directory.getCellList(load.item);
+                if (result && typeof result.catch === 'function') result.catch(() => {});
+                if (toggle) toggle.click();
+            } else {
+                if (toggle) toggle.click();
+            }
+        } catch (e) { }
     }
+    function settleLoad() {
+        if (!loading) return;
+        if (loading.generation !== revision || !loads.has(loading.load.id) || Date.now() - loading.since >= 8000) loading = null;
+    }
+    function select(page, force) {
+        sync(true);
+        if (!page || !pages.has(page.id()) || !study()) return false;
+        if (!force && activeId === page.id()) return true;
+        const target = nodeFor(page.id());
+        if (target) {
+            if (target.disabled || target.getAttribute('aria-disabled') === 'true' || target.matches('.is-disabled, .disabled')) {
+                env.halt('任务暂不可访问，请核对课程开放条件：' + page.title); return false;
+            }
+            if (activeId !== page.id()) stop(); target.click(); nextAt = Date.now() + 1600; return true;
+        }
+        const legacy = findVM('.guide, .teach', vm => vm.nextObj && typeof vm.preNext === 'function');
+        if (legacy && String(legacy.nextObj.id) === page.id()) { legacy.preNext(legacy.nextObj); nextAt = Date.now() + 1600; return true; }
+        env.say('目录已读取，但未找到该任务的原生跳转入口，请在目录中打开');
+        return false;
+    }
+    const facade = {
+        course: { chapters: () => { sync(); return chapters; }, name: () => {
+            sync();
+            return clean(directory && (directory.courseName || directory.courseInfo && directory.courseInfo.name) ||
+                doc.querySelector('.course-name, .courseName, .course-title')?.textContent || doc.title || '智慧职教学习进度');
+        } },
+        currentPage: () => { sync(); return pages.get(activeId) || null; },
+        currentSection: () => { sync(); return sections.get(activeId) || null; },
+        currentChapter: () => { sync(); return rows.find(row => row.page.id() === activeId)?.chapter || null; },
+        selectPage: page => select(page)
+    };
+    function mediaNodes() {
+        const found = [];
+        for (const scope of documents()) {
+            for (const media of scope.querySelectorAll('video, audio')) {
+                const player = media.closest('.contentBox, .FilePreview, .guide, .teach');
+                const rendered = visible(media) || media.tagName === 'AUDIO' && visible(player);
+                if (media.closest(ignored) || !rendered) continue;
+                if (player || scope !== doc || !scope.querySelector('.contentBox, .FilePreview, .guide, .teach') && study()) found.push(media);
+            }
+        }
+        return found;
+    }
+    function status(text) { if (task) task.message = text; env.say(text); }
+    function waitForRecord(reason) {
+        if (!task.awaiting) { task.awaiting = Date.now(); task.refreshes = 0; task.refreshAt = Date.now() + 3000; }
+        if (task.refreshes >= 3 && Date.now() >= task.refreshAt) {
+            env.halt('平台连续三次未确认完成，已暂停；请在原课件核对保存结果后重试'); return;
+        }
+        status(reason + '，等待平台确认完成（已刷新 ' + task.refreshes + '/3）');
+        for (const media of mediaNodes()) ownedMedia.add(media);
+        pauseMedia();
+        if (Date.now() < task.refreshAt || task.refreshes >= 3) return;
+        // Reopening the selected native resource refreshes the platform's completed-ID list.
+        // No duration, percentage or completion field is written by the helper.
+        task.refreshAt = Date.now() + 15000; task.refreshes++;
+        select(task.page, true);
+        if (task.refreshes === 3) status('平台暂未确认完成；请核对原课件记录，暂停后可重新尝试');
+    }
+    function checkpoint(media, force) {
+        if (!task || !force && Date.now() - (task.savedAt || 0) < 10000 || !Number.isFinite(media.currentTime)) return;
+        task.savedAt = Date.now();
+        try { env.set('icve-checkpoint-v2:' + courseKey, { id: task.page.id(), index: mediaNodes().indexOf(media), second: media.currentTime, updatedAt: task.savedAt }); } catch (e) { }
+    }
+    function documentTick() {
+        const preview = findVM('.FilePreview, .guide, .teach', vm => Array.isArray(vm.photoList) || vm.officePage);
+        const content = findVM('.contentBox', vm => vm.officePage && vm.nrdata);
+        const target = preview || content;
+        if (target && Array.isArray(target.photoList) && target.photoList.length) {
+            const total = target.photoList.length;
+            const carousel = target.$refs && target.$refs.carousel;
+            const index = Number(target.carouselIndex ?? (carousel && carousel.activeIndex));
+            if (Number.isFinite(index)) {
+                if (index >= total - 1) { waitForRecord('文档已到最后一页'); return; }
+                if (Date.now() >= task.docAt && typeof target.next === 'function') { target.next(); task.docAt = Date.now() + 3000; }
+                status('文档浏览：' + (index + 1) + ' / ' + total); return;
+            }
+        }
+        if (content && Number(content.officePage.total) > 0) {
+            const page = Number(content.officePage.pageNum), total = Number(content.officePage.total);
+            if (page >= total) { waitForRecord('文档已到最后一页'); return; }
+            const next = Array.from(doc.querySelectorAll('.contentBox button, .contentBox .ivu-page-next'))
+                .find(el => !el.disabled && el.getAttribute('aria-disabled') !== 'true' && (el.matches('.ivu-page-next') || /^(?:下一页|下页)$/.test(clean(el.textContent))));
+            if (next && Date.now() >= task.docAt) { next.click(); task.docAt = Date.now() + 3000; }
+            status('文档浏览：' + page + ' / ' + total + (next ? '' : '，请使用原生翻页控件')); return;
+        }
+        // Text/image viewers save their own native read records; the helper never infers completion from elapsed time.
+        if (Date.now() - task.since > 6000) waitForRecord('正在读取文档／图文');
+        else status('正在加载文档／图文');
+    }
+    async function practiceTick(state) {
+        const detail = findVM('.shiti', vm => vm.sjData);
+        if (detail && Number(detail.sjData.submitStatus) === 1) { waitForRecord('练习已完成'); return; }
+        if (state.practiceBusy || state.practiceDone || Date.now() < (state.practiceRetryAt || 0)) return;
+        const questions = collectQuestions();
+        if (!questions.length) {
+            status('请打开章节练习；考试、作业需手动进入后使用「查询答案」');
+            return;
+        }
+        state.practiceBusy = true;
+        const generation = revision, controller = new AbortController(); state.controller = controller;
+        const valid = () => generation === revision && task === state && !controller.signal.aborted && study() && !env.paused();
+        try {
+            let filled = 0;
+            for (const q of questions) {
+                if (!valid()) return;
+                const count = await env.util().get_answer(q.title, q.quetype, null, env.jquery(q.div), 'practice',
+                    { signal: controller.signal, valid, requireFilled: true });
+                if (count > 0) filled++;
+            }
+            if (!valid()) return;
+            if (filled !== questions.length) {
+                state.practiceAttempts = (state.practiceAttempts || 0) + 1;
+                state.practiceRetryAt = Date.now() + 30000;
+                if (state.practiceAttempts >= 3) env.halt('练习连续处理失败，已暂停；请核对答案来源和题目控件');
+                else status('练习部分题目没有有效答案或填写失败，30 秒后重试（' + state.practiceAttempts + '/3）');
+                return;
+            }
+            state.practiceDone = true;
+            const submit = Array.from(doc.querySelectorAll('.content-item button, .question-operation button, .center_btn button'))
+                .find(el => visible(el) && !el.disabled && /^(?:提交答案|提交练习|检查答案|核对答案)$/.test(clean(el.textContent)));
+            if (submit && valid()) { submit.click(); waitForRecord('章节练习已填写并提交'); }
+            else status('练习已填写，请核对后使用页面原生提交入口');
+        } finally { state.practiceBusy = false; }
+    }
+    function tick() {
+        sync(true); settleLoad(); loadDirectory();
+        if (!study()) { if (env.running()) env.halt('当前不是课件学习页面'); return; }
+        if (Date.now() < nextAt) return;
+        const current = pages.get(activeId), pending = rows.find(row => row.page.known && !row.page.complete);
+        if (seekPending) {
+            seekPending = false;
+            if (pending && current !== pending.page) { select(pending.page); status('定位未完成任务：' + pending.page.title); return; }
+        }
+        if (!current || current.complete) {
+            if (pending) { if (select(pending.page)) status('定位未完成任务：' + pending.page.title); return; }
+            if (partial || rows.some(row => !row.page.known)) { status('目录或完成记录尚未读全，请等待或点击「重试目录」'); return; }
+            if (rows.length) { env.halt('课程任务均已由平台确认为完成，已停止'); return; }
+            status('请打开课程课件目录'); return;
+        }
+        if (!task || task.page !== current) {
+            stop(); task = { page: current, since: Date.now(), docAt: Date.now() + 3000, media: null, refreshes: 0 };
+        }
+        if (task.awaiting) { waitForRecord('当前资源已浏览'); return; }
+        if (Number(current.raw.nrlx) === 6 || /^(?:exam)$|考试/.test(clean(current.raw.fileType))) {
+            env.halt('考试任务请手动进入；答题页可使用「查询答案」，不会自动开始或交卷'); return;
+        }
+        if (current.type === 'practice') { void practiceTick(task).catch(() => status('练习处理失败，请在原页面检查')); return; }
+        if (current.type === 'manual' || current.type === 'unknown') {
+            env.halt('当前任务需要手动处理：' + current.title + '；完成后可继续'); return;
+        }
+        const playable = mediaNodes(), media = playable.find(node => !node.ended) || playable[0];
+        if (current.type === 'document' && !media) { documentTick(); return; }
+        if (!media) { status('等待视频／音频播放器加载，请先关闭遮挡播放器的提示'); return; }
+        task.media = media;
+        if (media.error && media.error.code) { env.halt('视频／音频加载失败，请在原播放器检查后重试'); return; }
+        if (media.ended) { waitForRecord('视频／音频已播放结束'); return; }
+        ownedMedia.add(media);
+        try {
+            media.muted = env.muted();
+            const maximumRate = /\/learnspace\/learn\//i.test(win.location.href) ? 2 : 16;
+            const rate = Math.min(maximumRate, Math.max(0.5, Number(env.rate()) || 1));
+            if (Math.abs(media.playbackRate - rate) > .01) media.playbackRate = rate;
+            if (task.restored !== media && media.readyState >= 1) {
+                task.restored = media;
+                // Native progress wins; a local checkpoint only resumes the same resource.
+                const saved = env.get('icve-checkpoint-v2:' + courseKey, null);
+                const viewer = findVM('.contentBox, .FilePreview, .guide, .teach', vm => typeof vm.isDrag === 'boolean');
+                if ((!viewer || viewer.isDrag !== false) && saved && saved.id === current.id() && (saved.index || 0) === playable.indexOf(media) && Number(saved.second) > 0 && media.currentTime < 1 &&
+                    Number(saved.second) < media.duration - 2) media.currentTime = Number(saved.second);
+            }
+            checkpoint(media);
+            if (media.paused && Date.now() >= (task.playAt || 0)) {
+                task.playAt = Date.now() + 2500;
+                const state = task;
+                const promise = media.play();
+                if (promise && promise.catch) promise.catch(() => { if (task === state) status('浏览器阻止自动播放，请在原播放器点击一次播放'); });
+            }
+            status((Number(current.raw.nrlx) === 11 || media.tagName === 'AUDIO' ? '音频' : '视频') + (media.paused ? '等待播放：' : '播放中：') +
+                Math.floor(media.currentTime || 0) + ' / ' + (Number.isFinite(media.duration) ? Math.floor(media.duration) + ' 秒' : '加载中') + ' · ' + media.playbackRate + 'x');
+        } catch (e) { status('播放器暂不可操作，请在原页面检查'); }
+    }
+    function readQuestion(root, kinds) {
+        if (!root || !root.matches(questionRoots) || root.closest(ignored)) return null;
+        const titleEl = root.querySelector('.questions-content [class*="title-content"], .titleTest span:not(.xvhao), h2, h3, h4, h5, h6, .q_title, .question-title, .divQuestionTitle, [name="fillblankTitle"]');
+        if (!titleEl) return null;
+        const clone = titleEl.cloneNode(true);
+        clone.querySelectorAll('script, style, .q_score, [name*="questionIndex"], .xvhao').forEach(el => el.remove());
+        const U = env.util(), $root = env.jquery(root), controls = U._blankControls($root);
+        let title = clean(controls.some(el => titleEl.contains(el)) ? U._stemText(titleEl, controls) : clone.textContent);
+        if (!title) return null;
+        let optionEls = [];
+        for (const selector of optionSelectors) { optionEls = Array.from(root.querySelectorAll(selector)); if (optionEls.length) break; }
+        const options = optionEls.map(el => clean(el.textContent).replace(/^[A-Z][.、．)）]\s*/, ''));
+        const label = clean(root.querySelector('.question-type, .type, .q_type, .titleTest, .questions-type')?.textContent || title);
+        const multiple = !!root.querySelector('input[type="checkbox"]') || /多选题/.test(label);
+        const judgeOptions = options.length === 2 && options.every(s => /^(?:正确|错误|对|错|是|否|true|false|yes|no|√|×)$/i.test(s));
+        const textareas = Array.from(root.querySelectorAll('textarea'));
+        const blank = controls.length > 0 || textareas.length > 1 || /填空/.test(label);
+        const typeName = multiple ? '多选题' : /判断题|^判断[:：\s]/.test(label) || judgeOptions ? '判断题' : options.length ? '单选题' :
+            /翻译/.test(label) ? '翻译题' : blank ? '填空题' : root.querySelector('textarea, [contenteditable="true"]') ? '简答题' : '';
+        if (!typeName) return null;
+        let blanks = U._blankInfo($root);
+        if (!blanks.length && blank) blanks = textareas.map((el, i) => ({ id: String(i + 1), type: 'text', options: [] }));
+        const missingInfo = [];
+        root.querySelectorAll('img:not([alt]), audio, video').forEach(el => missingInfo.push(el.tagName === 'IMG' ? '题目含未转写图片' : '题目含音视频，需补充转写内容'));
+        const materialParts = [];
+        let scope = root;
+        for (let depth = 0; scope && depth < 5 && !scope.matches('body, html'); depth++, scope = scope.parentElement) {
+            const materials = Array.from(scope.querySelectorAll('.question-material, .material, .passage, .q_material'))
+                .filter(el => !Array.from(scope.querySelectorAll(questionRoots)).some(child => child !== root && child.contains(el)));
+            for (const el of materials) { const text = clean(el.textContent); if (text && !materialParts.includes(text)) materialParts.push(text); }
+            if (materialParts.length) break;
+        }
+        const material = materialParts.join('\n');
+        return { title, options, typeName, kind: typeName === '判断题' ? 'judge' : options.length ? 'choice' : blank ? 'blank' : 'essay',
+            multiple, quetype: typeName, index: clean(root.querySelector('.question-index, .xvhao, [name*="questionIndex"]')?.textContent || ''),
+            blanks, blankCount: blanks.length, material, missingInfo, div: root, kinds: kinds || (assessment() ? 'exam' : 'practice') };
+    }
+    function collectQuestions() {
+        const roots = queryAll(questionRoots).filter(visible);
+        return roots.filter(root => !roots.some(child => child !== root && root.contains(child))).map(root => readQuestion(root)).filter(Boolean);
+    }
+    async function fill(answer, q, valid) {
+        if (!q || !valid()) return 0;
+        const U = env.util(), $root = env.jquery(q.div);
+        if (q.kind === 'judge') {
+            const parsed = U._judgeOf(answer), index = q.options.findIndex(text => U._judgeOf(text) === parsed);
+            return !parsed || index < 0 ? 0 : U._fill_choice($root, optionSelectors, String.fromCharCode(65 + index), false, valid);
+        }
+        if (q.kind === 'choice') return U._fill_choice($root, optionSelectors, answer, q.multiple, valid);
+        if (q.kind === 'blank') return U._blankControls($root).length ? U._fill_blanks($root, answer, valid) : U._fill_text($root, answer, valid);
+        return U._fill_text($root, answer, valid);
+    }
+    return { study, assessment, sync, tick, stop, begin: () => { stop(); seekPending = true; }, facade: () => { sync(); return facade; }, loadDirectory,
+        collectQuestions, readQuestion, fill, mediaNodes,
+        position: () => { const nodes = mediaNodes(), media = nodes.find(node => !node.ended) || nodes[0]; return media && media.duration > 0 ? Math.round(media.currentTime / media.duration * 100) : null; },
+        diagnostics: () => ({ platform: 'icve', tasks: rows.length, incompleteDirectory: partial, unknown: rows.filter(r => !r.page.known).length,
+            pendingFolders: loads.size, loading: !!loading, activeType: pages.get(activeId)?.type || '', running: env.running() }) };
+}
+    // END ICVE STUDY ADAPTER
 
     // Claim ownership before jQuery or any page hooks, including before <html> exists.
     function claimRuntime() {
@@ -489,11 +545,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.19.1');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.20.0');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.19.1',
+        codeVersion: '4.20.0',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
@@ -523,6 +579,14 @@
     // document-start 运行时页面 jQuery 尚未加载，$ 改为动态取用（页面 jQuery 就绪前回退到沙箱 jQuery）
     let $ = function (s, c) { return (unsafeWindow.jQuery || jquery)(s, c); };
     const jquery = jQuery.noConflict();
+    const Icve = IS_ICVE ? createIcveStudy({
+        window: $w, document, jquery,
+        get: (key, fallback) => GM_getValue(key, fallback), set: (key, value) => GM_setValue(key, value),
+        rate: () => _ulVideoRate(), muted: () => ConfigStore.get().sources.autoMute !== false, util: () => Util,
+        running: () => !!youxueyuan.timer, paused: () => !!youxueyuan._manualPaused,
+        say: text => _ulStudyState(text), halt: text => { youxueyuan.stop(); _ulStudyState(text); }
+    }) : null;
+
     const $version = GM_info.script.version.replaceAll('.','');
 
     // 尽早接管（document-start，先于页面一切脚本）
@@ -2108,11 +2172,12 @@
             const completed=rows.filter(r=>r.complete).length, unknown=rows.filter(r=>!r.known).length;
             const chapters=this.read(vm && vm.course,'chapters',[]);
             const partial=!catalog || !!catalog.partial || Array.isArray(chapters) && chapters.some(c=>!this.read(c,'isHide',false) && !this.read(c,'canStudy',false) && !this.read(c,'sections',[]).length);
-            let position=null;
-            try { const video=_ulVideoProgress(_ulVideoNodes(),0); if(video && Number(video.d)>0)position=Math.min(100,Math.max(0,Math.round(Number(video.c||0)/Number(video.d)*100))); } catch(e) { }
+            let position=typeof Icve !== 'undefined' && Icve ? Icve.position() : null;
+            try { const video=typeof Icve !== 'undefined' && Icve ? null : _ulVideoProgress(_ulVideoNodes(),0); if(video && Number(video.d)>0)position=Math.min(100,Math.max(0,Math.round(Number(video.c||0)/Number(video.d)*100))); } catch(e) { }
             return {vm,catalog,rows,completed,unknown,partial,current,position,total:rows.length,percent:rows.length?Math.round(completed/rows.length*100):0,running:!!youxueyuan.timer,title:String(this.read(vm && vm.course,'name','课程学习进度')),message:this.message};
         },
         load(snapshot) {
+            if (typeof Icve !== 'undefined' && Icve) { Icve.loadDirectory(); return; }
             if (!snapshot.catalog || !snapshot.catalog.sections.length) return;
             const vm=snapshot.vm, route=String(location.href);
             if (!_ulCatalogState || _ulCatalogState.vm!==vm || _ulCatalogState.route!==route) {
@@ -2162,7 +2227,7 @@
                 else if(action==='settings')openSettings();
                 else if(action==='start') { if(!document.querySelector('.ul-panel'))Init();if(!snapshot.current && snapshot.rows.length){const r=snapshot.rows.find(r=>!r.complete)||snapshot.rows[0];snapshot.vm.selectPage(r.page,r.section,r.chapter);}youxueyuan.start(false); }
                 else if(action==='pause')youxueyuan.stop();
-                else if(action==='retry'){if(_ulCatalogState){_ulCatalogState.failures.forEach((n,s)=>_ulCatalogState.failures.set(s,0));_ulCatalogState.retryAt.clear();}}
+                else if(action==='retry'){if(typeof Icve !== 'undefined' && Icve)Icve.loadDirectory(true);if(_ulCatalogState){_ulCatalogState.failures.forEach((n,s)=>_ulCatalogState.failures.set(s,0));_ulCatalogState.retryAt.clear();}}
                 else if(action==='more')this.limit+=80;
                 else if(action==='filter'){this.filter=button.dataset.filter;this.limit=80;}
                 else if(action==='view'){const r=snapshot.rows[Number(button.dataset.row)];if(r){snapshot.vm.selectPage(r.page,r.section,r.chapter);this.open(false);}}
@@ -2884,13 +2949,14 @@
         _blankControls: function ($node) {
             if (!$node || !$node.length) return [];
             const controls = [], seen = new Set();
-            $node.find('select, [role="combobox"], .el-select, .ul-select, .ant-select, .layui-form-select, .cloze-input, .blank-input, .blank-question input, input[type="text"]').each(function () {
+            $node.find('select, [role="combobox"], .el-select, .ul-select, .ant-select, .ivu-select, .layui-form-select, .cloze-input, .blank-input, .blank-question input, input[type="text"]').each(function () {
                 let el = this;
-                const custom = el.closest && (el.closest('.el-select, .ul-select, .ant-select, .layui-form-select') || el.closest('[role="combobox"]'));
+                const custom = el.closest && (el.closest('.el-select, .ul-select, .ant-select, .ivu-select, .layui-form-select') || el.closest('[role="combobox"]'));
                 if (custom) el = custom.querySelector('select') || custom;
                 else if (!/^(INPUT|SELECT|TEXTAREA)$/i.test(el.tagName || '')) el = el.querySelector && el.querySelector('select, input, textarea');
                 if (!el || seen.has(el) || el.disabled || /^(hidden|radio|checkbox|button|submit)$/i.test(el.type || '')) return;
-                if (el.closest && el.closest('.ul-panel, .ul-ovl, .el-select-dropdown, .ul-select-dropdown, [role="listbox"]')) return;
+                if (el.matches && el.matches('.ivu-select-disabled, [aria-disabled="true"]')) return;
+                if (el.closest && el.closest('.ul-panel, .ul-ovl, .el-select-dropdown, .ul-select-dropdown, .ivu-select-dropdown, [role="listbox"]')) return;
                 seen.add(el); controls.push(el);
             });
             return controls;
@@ -2903,14 +2969,14 @@
                 const attrs = ['aria-controls', 'aria-owns', 'aria-describedby'];
                 const owners = [el].concat(Array.from(el.querySelectorAll ? el.querySelectorAll('input, [role="combobox"]') : []));
                 owners.forEach(owner => attrs.forEach(attr => String(owner.getAttribute && owner.getAttribute(attr) || '').split(/\s+/).filter(Boolean).forEach(id => {
-                    const root = document.getElementById(id); if (root) roots.push(root);
+                    const root = (el.ownerDocument || document).getElementById(id); if (root) roots.push(root);
                 })));
                 if (popup) roots.push(popup);
-                roots.forEach(root => { if (root.querySelectorAll) nodes.push(...root.querySelectorAll('[role="option"], .el-select-dropdown__item, .ul-select-dropdown__item, .ant-select-item-option, .layui-anim dd')); });
+                roots.forEach(root => { if (root.querySelectorAll) nodes.push(...root.querySelectorAll('[role="option"], .el-select-dropdown__item, .ul-select-dropdown__item, .ant-select-item-option, .ivu-select-item, .layui-anim dd')); });
             }
             const seen = new Set();
             nodes.forEach(node => {
-                if (seen.has(node) || node.disabled || node.getAttribute && node.getAttribute('aria-disabled') === 'true' || /(?:^|\s)(?:is-disabled|disabled|layui-disabled)(?:\s|$)/.test(node.className || '')) return;
+                if (seen.has(node) || node.disabled || node.getAttribute && node.getAttribute('aria-disabled') === 'true' || /(?:^|\s)(?:is-disabled|disabled|layui-disabled|ivu-select-item-disabled)(?:\s|$)/.test(node.className || '')) return;
                 seen.add(node);
                 const value = native ? String(node.value) : String(node.getAttribute && (node.getAttribute('data-value') || node.getAttribute('lay-value')) || '');
                 const label = re_text(node.textContent || node.label || '');
@@ -2921,17 +2987,18 @@
         },
         _openBlank: async function (el) {
             if (String(el.tagName).toUpperCase() === 'SELECT') return { options: Util._blankOptions(el), close: function () {} };
-            const selector = '[role="listbox"], .el-select-dropdown, .ul-select-dropdown, .ant-select-dropdown, .layui-form-select dl';
-            const visible = n => !!(n.getClientRects && n.getClientRects().length) && (!window.getComputedStyle || window.getComputedStyle(n).visibility !== 'hidden');
-            const before = new Set(Array.from(document.querySelectorAll(selector)).filter(visible));
-            const trigger = el.querySelector && el.querySelector('[role="combobox"], input, .el-input, .ul-input, .ant-select-selector') || el;
+            const selector = '[role="listbox"], .el-select-dropdown, .ul-select-dropdown, .ant-select-dropdown, .ivu-select-dropdown, .layui-form-select dl';
+            const owner = el.ownerDocument || document, view = owner.defaultView || window;
+            const visible = n => !!(n.getClientRects && n.getClientRects().length) && (!view.getComputedStyle || view.getComputedStyle(n).visibility !== 'hidden');
+            const before = new Set(Array.from(owner.querySelectorAll(selector)).filter(visible));
+            const trigger = el.querySelector && (el.querySelector('.ivu-select-selection') || el.querySelector('[role="combobox"], input:not([type="hidden"]), .el-input, .ul-input, .ant-select-selector')) || el;
             const already = trigger.getAttribute && trigger.getAttribute('aria-expanded') === 'true';
             if (!already) trigger.click();
             let options = [];
             for (let tries = 0; tries < 10; tries++) {
                 options = Util._blankOptions(el);
                 if (!options.length) {
-                    const opened = Array.from(document.querySelectorAll(selector)).filter(n => visible(n) && !before.has(n));
+                    const opened = Array.from(owner.querySelectorAll(selector)).filter(n => visible(n) && !before.has(n));
                     const outer = opened.filter(n => !opened.some(other => other !== n && other.contains(n)));
                     if (outer.length === 1) options = Util._blankOptions(el, outer[0]);
                 }
@@ -3010,9 +3077,9 @@
                     } else {
                         option.node.click();
                         await new Promise(r => setTimeout(r, 80));
-                        const display = el.querySelector && el.querySelector('input, .ant-select-selection-item, .el-select__selected-item, .ul-select__selected-item');
+                        const display = el.querySelector && (el.querySelector('.ivu-select-selected-value') || el.querySelector('input:not([type="hidden"]), .ant-select-selection-item, .el-select__selected-item, .ul-select__selected-item'));
                         const shown = re_text(display ? display.value || display.textContent : el.textContent);
-                        if (shown === option.text || option.node.getAttribute('aria-selected') === 'true' || /(?:^|\s)(?:selected|is-selected|ant-select-item-option-selected)(?:\s|$)/.test(option.node.className || '')) filled++;
+                        if (shown === option.text || option.node.getAttribute('aria-selected') === 'true' || /(?:^|\s)(?:selected|is-selected|ant-select-item-option-selected|ivu-select-item-selected)(?:\s|$)/.test(option.node.className || '')) filled++;
                         else menu.close();
                     }
                 }
@@ -3225,6 +3292,7 @@
                 optionCount: q && q.options ? q.options.length : 0, blankCount: q && q.blankCount || 0 }, data || {}));
         },
         _read_question: function (div, kinds) {
+            if (typeof Icve !== 'undefined' && Icve) return Icve.readQuestion(div, kinds);
             let out = { title: "", options: [], typeName: "", kind: "generic", quetype: "", index: "" };
             let readStage = 'metadata';
             try {
@@ -3277,6 +3345,7 @@
             return out.title ? out : null;
         },
         _collectQuestions: function () {
+            if (typeof Icve !== 'undefined' && Icve) return Icve.collectQuestions();
             const candidates = new Set(), out = [];
             const excluded = el => !el || el.closest('.ul-panel, .ul-ovl, .ul-study-dashboard, .next-part') || !el.getClientRects().length;
             const roots = Array.from(document.querySelectorAll('.question-area, .questions'));
@@ -4032,6 +4101,7 @@
                         let n = 0;
                         if (!valid()) return 0;
                         try {
+                            if ($ans && typeof Icve !== 'undefined' && Icve) return await Icve.fill(ansTxt, qinfo, valid) || 0;
                             if ($ans && kinds == "exam") n = await Object.assign({}, respondentExam, { _valid: valid })._answer(ansTxt, $ans) || 0;
                             if ($ans && kinds == "homework") n = await Object.assign({}, respondentHomeWork, { _valid: valid })._answer(ansTxt, $ans) || 0;
                             if ($ans && kinds == "practice") n = await respondent.fillFrom(ansTxt, kind, options, $ans, valid) || 0;
@@ -4233,7 +4303,7 @@
             if (!panel) return false;
             const existing = document.getElementById('ul_study_row');
             if (existing && panel.contains(existing)) return true;
-            let savedRate = '6.00';
+            let savedRate = typeof Icve !== 'undefined' && Icve ? '2.00' : '6.00';
             try { savedRate = this.$rateText.find('input').val() || savedRate; } catch (e) {}
             // 学习控制条挂载到悬浮窗，避免非法表格结构影响布局。
             this.$startBtn = jquery('<button class="ul-btn ul-btn-primary" id="ul_study_start">开始刷课</button>');
@@ -4272,6 +4342,7 @@
                     const cache=StudyDashboard.catalogCache;cache.failures.forEach((n,s)=>cache.failures.set(s,0));cache.retryAt.clear();_ulCatalogState=cache;
                 }
                 _ulPracticeQuestions().each(function () { delete this._ulPracticeFailed; });
+                if (typeof Icve !== 'undefined' && Icve) Icve.begin();
                 this.logic();
                 if (this._manualPaused) return;
                 this.timer = setInterval(() => { this.logic(); }, 500);
@@ -4287,6 +4358,7 @@
         // 暂停刷课
         stop() {
             this._manualPaused = true;
+            if (typeof Icve !== 'undefined' && Icve) Icve.stop();
             try {
                 if (this._autoTimer) { clearTimeout(this._autoTimer); this._autoTimer = null; }
                 if (typeof _ulEndedRefresh !== 'undefined') {
@@ -4305,7 +4377,7 @@
                 this.timer = null;
                 clearInterval(this.wd);
                 this.wd = null;
-                _ulVideoNodes().each(function () {
+                if (!(typeof Icve !== 'undefined' && Icve)) _ulVideoNodes().each(function () {
                     const video = _ulVideoPlayable(this);
                     try { if (video && typeof video.pause === 'function') video.pause(); } catch (e) {}
                 });
@@ -4324,6 +4396,7 @@
 
         // 视频主逻辑
         logic() {
+            if (typeof Icve !== 'undefined' && Icve) { try { Icve.tick(); } catch (e) { _ulStudyState("智慧职教读取失败，请重试目录或查看原课件"); } return; }
             try {   // 捕获单轮异常，保留后续运行机会。
             if (this._courseFinished) return;
             if (_ulNavigatePending(false)) return;
@@ -4493,6 +4566,7 @@
     let _ulCatalogState = null;
     let _ulPartialCatalog = { vm: null, route: '', since: 0 };
     function _ulCourseVM() {
+        if (typeof Icve !== 'undefined' && Icve) return Icve.facade();
         const usable = vm => vm && typeof vm.currentPage === 'function';
         const navigable = vm => usable(vm) && vm.course && typeof vm.selectPage === 'function';
         return navigable($w.koLearnCourseViewModel) ? $w.koLearnCourseViewModel
@@ -4801,6 +4875,7 @@
     }
     let _ulVideoSaveState = null, _ulVideoSaveController = null;
     function _ulPlatformVideoContext() {
+        if (typeof Icve !== 'undefined' && Icve) return null;
         try {
             const vm = _ulCourseVM();
             if (!vm || typeof vm.currentPage !== 'function' || typeof vm.currentSection !== 'function') return null;
@@ -5263,6 +5338,7 @@
     // 和 logic() 的分支链完全解耦 —— 弹窗关不掉、练习 busy 卡住、面板没消失，都不会再让它失效。
     let _ulWdBusy = false;
     function _ulVideoWatchdog() {
+        if (typeof Icve !== 'undefined' && Icve) return;
         if (_ulWdBusy) return;
         if (!youxueyuan || !youxueyuan.timer) return;              // 没在刷课就别自作主张播视频
         try {
@@ -6025,6 +6101,7 @@
 
 //拦截
 function Re_Write() {
+    if (typeof IS_ICVE !== 'undefined' && IS_ICVE) return;
     if (Re_Write.done) return;
     const open = unsafeWindow.XMLHttpRequest.prototype.open;
     unsafeWindow.XMLHttpRequest.prototype.open = function () {
@@ -6460,6 +6537,7 @@ function getToken(info){
 
 // 按页面类型选择全屏行为，课件页保留原生视频全屏。
 function _ulIsStudyPage(uu) {
+    if (typeof Icve !== 'undefined' && Icve) return Icve.study(uu);
     const u = String(uu == null ? location.href : uu);
     let route=u;
     try { const parsed=new URL(u,location.href);route=parsed.pathname+parsed.hash.split('?')[0]; } catch(e){}
@@ -6475,6 +6553,7 @@ function _ulSyncPanelMode() {
     if (row) row.hidden = !study;
 }
 function _isExamLikePage(uu, hh) {
+    if (typeof Icve !== 'undefined' && Icve) return Icve.assessment(uu);
     try {
         let u = String(uu == null ? (location.href || "") : uu), h = String(hh == null ? (location.hostname || "") : hh);
         try {
@@ -6490,6 +6569,7 @@ function _isExamLikePage(uu, hh) {
 
 //解除网页防作弊机制：强制全屏/禁止复制粘贴/禁止右键/禁止控制台/切屏离开检测
 function KillAntiCheat() {
+    if (typeof IS_ICVE !== 'undefined' && IS_ICVE) return;
     if (KillAntiCheat._done) { KillAntiCheat._assert(); KillAntiCheat._exitFS(); return; }
     KillAntiCheat._done = true;
     // 诊断开关：记录平台对全屏/可见性/尺寸 API 的读取与调用，用于定位检测手段
@@ -6755,6 +6835,7 @@ function KillAntiCheat() {
     //      —— 后者是课件页视频进度的必经接口，整条吞掉会导致"进度不保存、学时不算"；
 //   3. GET 的离开记录接口（getLeaveCount 等）响应里的记录字段强制清零。
 function NoReport() {
+    if (typeof IS_ICVE !== 'undefined' && IS_ICVE) return;
     if (NoReport.done) return;
     NoReport.done = true;
     // 匹配规则说明：不能要求"关键词后面必须是路径分隔符"——
@@ -7067,6 +7148,7 @@ function NoReport() {
 
 // 页面环境处理：覆盖可见性、焦点事件、组件状态和行为上报；保留答题控件的失焦保存。
 function LeaveShield() {
+    if (typeof IS_ICVE !== 'undefined' && IS_ICVE) return;
     if (LeaveShield.done) return;
     LeaveShield.done = true;
     let logs = 0, once = {};
@@ -7297,6 +7379,7 @@ function LeaveShield() {
 
 // 页面文字处理默认关闭，保留原始题目和提示文本。
 function WarningEater() {
+    if (typeof IS_ICVE !== 'undefined' && IS_ICVE) return;
     if (WarningEater.done) return;
     WarningEater.done = true;
     // 保持页面文字和布局不变。
@@ -7535,6 +7618,7 @@ function WarningEater() {
 // ② 把该组件链上 1..60 的倒计时数字字段归零，让按钮立即可点。
 // 注意：不会自动点击任何按钮，仍由你自己确认；只在按钮真的被禁用时才动手，正常弹窗完全不受影响。
 function FastStart() {
+    if (typeof IS_ICVE !== 'undefined' && IS_ICVE) return;
     if (FastStart.done) return;
     FastStart.done = true;
     let OK = /(确定|确认|开始考试|开始答题|进入考试|进入答题|立即开始|立即|开始|继续|我已知晓|知道了|同意|仍要|下一步|好的|阅读完毕|准备好了|接受)/;
@@ -7801,6 +7885,7 @@ function FastStart() {
 // 抓取页面内联/外链脚本源码中与"全屏/离开检测"相关的片段打印到控制台，
 // 一次跑测即可看到平台检测代码长什么样，方便后续精准对抗。
 function AntiCheatProbe() {
+    if (typeof IS_ICVE !== 'undefined' && IS_ICVE) return;
     if (AntiCheatProbe.ENABLED !== true) return;   // 诊断用，默认关闭（改 true 可打印平台源码与检测点）
     if (AntiCheatProbe.done) return;
     AntiCheatProbe.done = true;
@@ -9293,11 +9378,14 @@ function AntiCheatProbe() {
     try { GM_registerMenuCommand("⚙ Ulearn-Helper 设置", function () { openSettings(); }); } catch (e) { }
     try { GM_registerMenuCommand("↻ 检查脚本更新", function () { UI.open('about'); }); } catch(e) { }
     try {
-        if (window.top === window && /(?:^|\.)ulearning\.cn$/.test(location.hostname)) {
+        if (window.top === window && (IS_ICVE || /(?:^|\.)ulearning\.cn$/.test(location.hostname))) {
             setTimeout(() => ScriptUpdates.check(false),6000);
         }
     } catch(e) { }
     try { if(window.top===window.self){StudyDashboard.sync();setInterval(()=>{try{StudyDashboard.sync();}catch(e){}},1000);} }catch(e){}
+    if (typeof Icve !== 'undefined' && Icve) setInterval(() => {
+        try { Icve.sync(); _ulSyncPanelMode(); if (_ulIsStudyPage()) Init(); } catch (e) { }
+    }, 1000);
     try { UI.applyTheme(); } catch (e) { }   // 启动即按保存的主题（跟随系统/浅色/深色）
     try {
         if (!window.__ulSettingsEntry) {
