@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.11
-// @description  Ulearn-Helper v4.18.11：修复视频完成后的跳转、目录读取阻塞及学习面板定位。
+// @version      4.19.0
+// @description  Ulearn-Helper v4.19.0：新增智慧职教课程导航和本地学习记录。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -17,6 +17,11 @@
 // @match        https://*.ulearning.cn/learnCourse/*
 // @match        https://*.ulearning.cn/*/learnCourse/*
 // @match        https://*.ulearning.cn/*
+// @match        https://ai.icve.com.cn/*
+// @match        https://mooc.icve.com.cn/*
+// @match        https://icve-mooc.icve.com.cn/*
+// @match        https://zjy2.icve.com.cn/*
+// @match        https://zyk.icve.com.cn/*
 // @require      https://code.jquery.com/jquery-1.12.4.min.js
 // @run-at       document-start
 // @all-frames   true

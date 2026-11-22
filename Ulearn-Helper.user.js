@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.18.11
-// @description  Ulearn-Helper v4.18.11：修复视频完成后的跳转、目录读取阻塞及学习面板定位。
+// @version      4.19.0
+// @description  Ulearn-Helper v4.19.0：新增智慧职教课程导航和本地学习记录。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -17,6 +17,11 @@
 // @match        https://*.ulearning.cn/learnCourse/*
 // @match        https://*.ulearning.cn/*/learnCourse/*
 // @match        https://*.ulearning.cn/*
+// @match        https://ai.icve.com.cn/*
+// @match        https://mooc.icve.com.cn/*
+// @match        https://icve-mooc.icve.com.cn/*
+// @match        https://zjy2.icve.com.cn/*
+// @match        https://zyk.icve.com.cn/*
 // @require      https://code.jquery.com/jquery-1.12.4.min.js
 // @run-at       document-start
 // @all-frames   true
@@ -41,6 +46,258 @@
 
 (function () {
     "use strict";
+    function initIcve() {
+        if (window.top !== window.self) return;
+
+        const routes = /course|chapter|lesson|courseware|learn|study/i;
+        const assessment = /(?:^|[/#?&_.-])(?:exam|homework|test|quiz|paper|answer)(?:[/#?&=_.-]|$)/i;
+        const identifiers = /^(?:course(?:Info)?Id|classId|chapterId|sectionId|itemId|lessonId|cellId|resourceId)$/i;
+        const states = { idle: '待开始', running: '记录中', paused: '已暂停', completed: '已完成' };
+        const taskActions = {
+            idle: [['开始记录', 'running']],
+            running: [['暂停记录', 'paused'], ['标记完成', 'completed']],
+            paused: [['继续记录', 'running'], ['标记完成', 'completed']],
+            completed: [['重新开始', 'running']],
+        };
+
+        function pageIdentity(url) {
+            const hash = url.hash.startsWith('#/') ? new URL(url.origin + url.hash.slice(1)) : null;
+            function idQuery(params) {
+                const ids = Array.from(params).filter(([key, value]) => identifiers.test(key) && /^[\w-]{1,128}$/.test(value));
+                return new URLSearchParams(ids.sort()).toString();
+            }
+            return JSON.stringify([url.origin, url.pathname, idQuery(url.searchParams),
+                hash?.pathname || '', hash ? idQuery(hash.searchParams) : '']);
+        }
+
+        function isAssessment(url) {
+            const route = url.pathname + url.search + url.hash;
+            return assessment.test(route) || /(?:exam|homework|paper|test|quiz)(?:Id|Detail|Preview|View|Result|List|Center)/i.test(route);
+        }
+
+        function element(tag, text, attributes = {}) {
+            const node = document.createElement(tag);
+            if (text) node.textContent = text;
+            for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
+            return node;
+        }
+
+        function visible(node) {
+            return node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
+        }
+
+        function mount() {
+            if (document.getElementById('ulearn-icve')) return;
+            const host = element('div', '', { id: 'ulearn-icve' });
+            const shadow = host.attachShadow({ mode: 'open' });
+            const styles = element('style', `
+                :host{all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483646;color-scheme:light}
+                *{box-sizing:border-box}
+                :host([hidden]),[hidden]{display:none!important}
+                .shell{width:min(344px,calc(100vw - 32px));max-height:calc(100dvh - 92px);overflow:auto;background:#f5f9fc;color:#132b3c;border:1px solid #b6c9d5;border-top:4px solid #086873;border-radius:12px;box-shadow:0 9px 32px #132b3c26;padding:16px;margin-bottom:9px;font:14px/1.5 "Inter","Microsoft YaHei",system-ui,sans-serif}
+                header,.buttons{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+                header{justify-content:space-between;flex-wrap:nowrap}
+                h2,h3,p{margin:0}
+                h2{font-size:18px}
+                h3{font-size:14px}
+                section{border-top:1px solid #d3dfe7;margin-top:12px;padding-top:10px}
+                .current{margin-top:8px;font-weight:650;overflow-wrap:anywhere}
+                .detail{color:#41596a;overflow-wrap:anywhere}
+                button{border:1px solid #b6c9d5;background:#fff;color:#132b3c;font:inherit;padding:6px 9px;border-radius:6px;cursor:pointer}
+                button:hover{background:#e3f0f2}
+                button:focus-visible,a:focus-visible{outline:3px solid #087684;outline-offset:2px}
+                .toggle,.primary{background:#086873;color:#fff;border-color:#086873}
+                .toggle:hover,.primary:hover{background:#075a63}
+                .toggle{display:block;margin-left:auto;box-shadow:0 3px 14px #132b3c35}
+                .buttons{margin-top:8px}
+                ol{margin:6px 0 0;padding-left:22px;max-height:150px;overflow:auto}
+                li{padding:2px 0;overflow-wrap:anywhere}
+                a{color:#075b6b;text-underline-offset:2px}
+                [role=status]{margin-top:8px;color:#41596a}
+            `);
+            const panel = element('section', '', { class: 'shell', id: 'icve-study-panel', 'aria-labelledby': 'icve-study-title', hidden: '' });
+            const open = element('button', '智慧职教', {
+                type: 'button', class: 'toggle', 'aria-expanded': 'false', 'aria-controls': panel.id,
+            });
+            const close = element('button', '收起', { type: 'button' });
+            const refresh = element('button', '刷新', { type: 'button' });
+            const title = element('p', '', { class: 'current' });
+            const taskStatus = element('p', '', { class: 'detail' });
+            const checkpoint = element('p', '', { class: 'detail' });
+            const courseLinks = element('ol', '', { 'aria-label': '当前页面课程和章节链接' });
+            const emptyLinks = element('p', '当前页面没有识别到可见的课程或章节链接。', { class: 'detail' });
+            const message = element('p', '', { role: 'status', hidden: '' });
+            const actions = element('div', '', { class: 'buttons' });
+            const header = element('header');
+            const tools = element('div', '', { class: 'buttons' });
+            const progressSection = element('section');
+            const linkSection = element('section');
+            tools.append(refresh, close);
+            header.append(element('h2', '学习记录', { id: 'icve-study-title' }), tools);
+            progressSection.append(element('h3', '本页任务和检查点'), taskStatus, checkpoint, actions);
+            linkSection.append(element('h3', '课程与章节'), courseLinks, emptyLinks);
+            panel.append(header, title, progressSection, linkSection, message);
+            shadow.append(styles, panel, open);
+            document.body.append(host);
+
+            function announce(text) {
+                message.hidden = !text;
+                message.textContent = text;
+            }
+
+            function setExpanded(expanded) {
+                panel.hidden = !expanded;
+                open.setAttribute('aria-expanded', String(expanded));
+            }
+
+            function updateRoute() {
+                host.hidden = isAssessment(new URL(location.href));
+                if (host.hidden) setExpanded(false);
+            }
+
+            function storageKey() {
+                return 'icve-study-v1:' + pageIdentity(new URL(location.href));
+            }
+
+            function read(key) {
+                const saved = GM_getValue(key, null);
+                return {
+                    state: Object.hasOwn(states, saved?.state) ? saved.state : 'idle',
+                    checkpoint: Number.isFinite(saved?.checkpoint?.time) ? saved.checkpoint : null,
+                };
+            }
+
+            function record(action) {
+                if (isAssessment(new URL(location.href))) {
+                    updateRoute();
+                    return;
+                }
+                try {
+                    const key = storageKey();
+                    const saved = read(key);
+                    if (action === 'save') {
+                        const video = Array.from(document.querySelectorAll('video')).find(visible);
+                        const second = video && Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : null;
+                        saved.checkpoint = { time: Date.now(), second };
+                    } else if (taskActions[saved.state].some(([, target]) => target === action)) {
+                        saved.state = action;
+                    } else {
+                        renderProgress();
+                        return;
+                    }
+                    GM_setValue(key, saved);
+                    renderProgress();
+                    announce(action === 'save' ? '已保存本页学习检查点。' : '本页任务状态已更新。');
+                } catch {
+                    announce('本地记录保存失败，请检查油猴存储权限。');
+                }
+            }
+
+            function renderProgress() {
+                const saved = read(storageKey());
+                taskStatus.textContent = '本地状态：' + states[saved.state];
+                checkpoint.textContent = saved.checkpoint
+                    ? '上次记录：' + new Date(saved.checkpoint.time).toLocaleString('zh-CN')
+                    : '本页尚无学习检查点';
+                if (Number.isFinite(saved.checkpoint?.second)) {
+                    checkpoint.textContent += ' · 视频 ' + saved.checkpoint.second + ' 秒';
+                }
+                const buttons = [...taskActions[saved.state], ['保存检查点', 'save']].map(([label, action], index) => {
+                    const button = element('button', label, { type: 'button', 'data-action': action });
+                    if (index === 0) button.classList.add('primary');
+                    button.addEventListener('click', () => record(action));
+                    return button;
+                });
+                const hadFocus = actions.contains(shadow.activeElement);
+                actions.replaceChildren(...buttons);
+                if (hadFocus) buttons[0].focus();
+            }
+
+            function render() {
+                announce('');
+                title.textContent = (document.querySelector('h1')?.textContent.trim() || document.title || '当前学习页面').slice(0, 140);
+                try {
+                    renderProgress();
+                } catch {
+                    actions.replaceChildren();
+                    taskStatus.textContent = '无法读取本地任务';
+                    checkpoint.textContent = '';
+                    announce('请检查油猴存储权限。');
+                }
+
+                const links = new Map();
+                for (const node of document.querySelectorAll('a[href]')) {
+                    let url;
+                    try { url = new URL(node.href, location.href); } catch { continue; }
+                    if (!url || url.origin !== location.origin || isAssessment(url)) continue;
+                    if (!routes.test(url.pathname + url.hash.split('?')[0]) && !Array.from(url.searchParams.keys()).some(key => identifiers.test(key))) continue;
+                    const label = (node.innerText || node.textContent).trim().replace(/\s+/g, ' ').slice(0, 95);
+                    if (!label || !visible(node)) continue;
+                    const key = pageIdentity(url);
+                    if (!links.has(key)) links.set(key, { href: url.href, label });
+                    if (links.size === 30) break;
+                }
+                const items = Array.from(links.values(), ({ href, label }) => {
+                    const item = element('li');
+                    item.append(element('a', label, { href }));
+                    return item;
+                });
+                courseLinks.replaceChildren(...items);
+                courseLinks.hidden = items.length === 0;
+                emptyLinks.hidden = items.length > 0;
+            }
+
+            open.addEventListener('click', () => {
+                if (isAssessment(new URL(location.href))) {
+                    updateRoute();
+                    return;
+                }
+                setExpanded(panel.hidden);
+                if (!panel.hidden) {
+                    render();
+                    close.focus();
+                }
+            });
+            close.addEventListener('click', () => {
+                setExpanded(false);
+                open.focus();
+            });
+            refresh.addEventListener('click', render);
+            panel.addEventListener('keydown', event => {
+                if (event.key === 'Escape') {
+                    event.stopPropagation();
+                    close.click();
+                }
+            });
+            let lastRoute = location.href;
+            function onRouteChange() {
+                if (location.href === lastRoute) return;
+                lastRoute = location.href;
+                updateRoute();
+                if (!panel.hidden) render();
+            }
+            updateRoute();
+            window.addEventListener('hashchange', onRouteChange);
+            window.addEventListener('popstate', onRouteChange);
+            window.setInterval(onRouteChange, 1000);
+        }
+
+        if (document.body) mount();
+        else document.addEventListener('DOMContentLoaded', mount, { once: true });
+    }
+
+    const icveHosts = new Set([
+        'ai.icve.com.cn',
+        'mooc.icve.com.cn',
+        'icve-mooc.icve.com.cn',
+        'zjy2.icve.com.cn',
+        'zyk.icve.com.cn',
+    ]);
+    if (icveHosts.has(location.hostname)) {
+        initIcve();
+        return;
+    }
+
     // Claim ownership before jQuery or any page hooks, including before <html> exists.
     function claimRuntime() {
         if (window.top !== window.self) return true;
@@ -61,11 +318,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.18.11');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.19.0');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.18.11',
+        codeVersion: '4.19.0',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {

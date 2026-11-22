@@ -1,8 +1,8 @@
 # Ulearn-Helper
 
-优学院（Ulearning）Tampermonkey 脚本，提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
+支持优学院（Ulearning）和智慧职教的 Tampermonkey 脚本。优学院提供课程进度工作台、视频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。智慧职教提供课程导航和本地学习记录。
 
-当前脚本：**v4.18.11** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.19.0** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -38,6 +38,17 @@ v4.18.1 将安装名称统一为 Ulearn-Helper。如果仍显示旧名称，优�
 4. 在课件页查看学习工作台；在作业／考试页使用答题工具。先确认识别出的题目、答案与填写结果，再进行页面上的提交操作。
 
 密钥只需保存一次。输入框显示“已保存”且为空是正常行为；输入新值可替换，点击“清除”可删除。更换浏览器配置文件或移除脚本存储后，需要重新配置。
+
+## 智慧职教
+
+打开智慧职教、职教云或资源库中已适配的页面，点击右下角的「智慧职教」展开学习记录。
+
+- **课程与章节导航**：汇总当前页面可见的课程和章节链接，支持直接跳转。
+- **本地任务状态**：手动开始、暂停、继续和标记完成。
+- **学习检查点**：保存记录时间与可读取的视频播放位置，返回同一页面后可以查看。
+- **测验页面**：识别到考试、作业或测验页面时收起面板。
+
+学习记录保存在当前浏览器的 Tampermonkey 脚本存储中。当前版本匹配 `ai.icve.com.cn`、`mooc.icve.com.cn`、`icve-mooc.icve.com.cn`、`zjy2.icve.com.cn` 和 `zyk.icve.com.cn`。
 
 ## 功能
 
