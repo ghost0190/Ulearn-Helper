@@ -2,7 +2,7 @@
 
 支持优学院（Ulearning）与智慧职教（ICVE）的 Tampermonkey 脚本，提供课程进度工作台、视频／音频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.21.4** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.21.5** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -92,7 +92,12 @@ v4.18.1 将安装名称统一为 Ulearn-Helper。如果仍显示旧名称，优�
 
 首次学习某个资源时服务端还没有 `studentStudyRecord`，此时提交会带 `id: null` 由服务端创建记录（这是平台原本的行为），不会被当成错误跳过。资源详情接口 `courseContent/{id}` 对部分课件会返回 `400 课件不存在`——这只说明用这条路读不到已有记录 id，**不代表不能提交**，脚本仍会照常提交，并把该条标注为「已提交（无法回读确认）」而不是失败。
 
-资源库的目录结构有个容易踩的坑：`fileType` 字段**恒为「子节点」**，连真正的视频课件也标成子节点，层级信息在 `level` 字段里。脚本因此不按 `fileType` 判文件夹，而是「扫到过下级的是文件夹，没下级的是学习单元」，学习单元再按 `resourceId` 与 `fileUrl` 的扩展名细分为视频／文档。
+资源库的目录结构有两个容易踩的坑，脚本对它们的处理都在实测里纠正过：
+
+1. `fileType` 字段**恒为「子节点」**，连真正的视频课件也标成子节点；层级信息在 `level` 字段里，而 `level` 是「要返回的项的层级」——`parentId=章节id` 要配 `level=2` 才能拿到该章节的学习单元，传父节点自己的 level 只会得到空列表。
+2. 部分章节只是标题，下面没有任何资源。这类节点既不该当文件夹，也不该当学习单元提交。
+
+因此脚本不再按 `fileType` 判文件夹，而是「子查询（`level+1`）有返回 → 文件夹，否则是学习单元」，学习单元再按 `resourceId` 与 `fileUrl` 扩展名细分为视频／文档；两者都没有的节点归为 `unknown`，不参与提交。
 
 **每个任务提交后都会回读校验**：服务器没有生效即判失败并给出原因；提交接口的判定只认响应正文里的「操作成功」，HTTP 200 或 `code:200` 都不算数。若回读接口本身对该资源不可用，则以提交结果为准并明确标注「无法回读确认」，不会把「读不到」误判成「没写进去」。目录中的文件夹、讨论、考试节点不会作为学习任务提交。协议答题的答案仍按来源顺序获取（本地题库 → 远程库 → 后端 → AI），交卷覆盖资源库与 AI优课，职教云本版只做学习进度。智慧职教不提供带正确答案的试卷接口，因此答题不依赖平台答案。
 

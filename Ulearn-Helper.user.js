@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.4
+// @version      4.21.5
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -539,11 +539,19 @@
         if (!task) return 'unknown';
         // 资源库真实目录里 fileType 恒为「子节点」，类型要看 typeId / resourceId / fileUrl
         const t = String((task.fileType || task.type || task.contentType) || '').trim().toLowerCase();
-        const hit = FILE_TYPE_MAP[t];
-        if (hit && hit !== 'folder') return hit;
-        // 有资源 id 或可下载文件 → 是学习单元，按文件扩展名细分
         const resId = task.resourceId != null ? String(task.resourceId) : '';
         const url = String(task.fileUrl || task.fileGenUrl || '');
+        const ty = String(task.typeId != null ? task.typeId : '');
+        // 先判「这是不是一个真有内容的学习单元」：
+        // 既没有资源、也没有文件、也没有 typeId/examId 的，只是带名字的章节标题，不能提交
+        const hasContent = resId || url || ty || task.examId != null;
+        const hit = FILE_TYPE_MAP[t];
+        if (hit && hit !== 'folder') return hit;
+        if (!hasContent) {
+            if (t === '父节点' || t === '子节点' || t === '文件夹' || t === 'folder') return 'folder';
+            return 'unknown';
+        }
+        // 有资源的：按扩展名细分
         const ext = (url.match(/\.([a-z0-9]{2,5})(?:[?#]|$)/i) || [])[1];
         if (ext) {
             const e = ext.toLowerCase();
@@ -552,8 +560,8 @@
         }
         if (resId) {
             // typeId 在目录里区分课件/视频/作业等，但取值不稳定；有 resourceId 就当可学单元
-            const ty = String(task.typeId != null ? task.typeId : '');
             if (/^(mp4|m4a|mp3|video|视频)$/.test(ty)) return 'media';
+            if (/^(exam|quiz|work|homework|作业|测验|考试|练习)$/.test(ty)) return 'exam';
             return 'document';
         }
         if (/mp4|m4a|mp3|video|audio|视频|音频/.test(t)) return 'media';
@@ -561,7 +569,7 @@
         if (/讨论|discuss/.test(t)) return 'manual';
         if (/ppt|pdf|doc|xls|txt|文档|课件/.test(t)) return 'document';
         if (t === '父节点' || t === '子节点' || t === '文件夹' || t === 'folder') return 'folder';
-        return 'unknown';
+        return 'document';
     }
 
     async function studyOnce(target) {
@@ -817,15 +825,17 @@
                 sample: list.slice(0, 3).map(n => ({
                     id: n.id, name: String(n.name || '').slice(0, 30), fileType: n.fileType,
                     nodeLevel: n.level, last: n.last, children: childCount(n),
+                    resourceId: n.resourceId, typeId: n.typeId,
                     parentId: n.parentId, examId: n.examId, fileUrl: String(n.fileUrl || '').slice(0, 60),
                     hasRecord: !!n.studentStudyRecord, recordKeys: n.studentStudyRecord ? Object.keys(n.studentStudyRecord) : [],
                 })),
             });
+            // 子级一律用 level + 1 查（level 是「要返回的项的层级」）
             for (const n of list) {
                 const id = String(n.id != null ? n.id : '');
                 if (!id || seen.has(id)) continue;
                 seen.add(id);
-                if (mayHaveChildren(n, level)) await walk(id, levelNum(n, level), depth + 1);
+                if (level < MAX_LEVEL) await walk(id, level + 1, depth + 1);
             }
         };
         await walk(target.parentId || 0, target.level || 1, 0);
@@ -852,44 +862,54 @@
         return out;
     }
 
-    /** 递归展开课程目录，返回扁平任务列表 [{id, name, fileType, parentId, level, ...}] */
+    /** 递归展开课程目录，返回扁平任务列表 [{id, name, fileType, parentId, level, ...}]
+     *
+     *  level 参数查的是「要返回的项的层级」，不是父节点的层级：
+     *    parentId=0        & level=1 → 章节
+     *    parentId=<章节id>  & level=2 → 该章节下的学习单元
+     *  之前把 node.level 直接当子级 level 传下去，子查询恒为空，
+     *  结果所有节点都被判成文件夹（39 个节点 → 0 个可直提）。
+     *  现在文件夹完全以「子查询有没有返回内容」为准，不再猜。
+     */
     async function scanTree(target, options) {
         const o = options || {};
         const out = [];
         const seen = new Set();
+        const maxDepth = o.maxDepth || MAX_LEVEL;
         const walk = async (parentId, level) => {
-            if (level > (o.maxDepth || MAX_LEVEL)) return;
+            if (level > maxDepth) return 0;
             const kids = await scanOnce(Object.assign({}, target, { parentId, level }));
-            for (const node of kids || []) {
+            const list = Array.isArray(kids) ? kids : [];
+            let added = 0;
+            for (const node of list) {
                 const id = String(node.id != null ? node.id : '');
                 if (!id || seen.has(id)) continue;
                 seen.add(id);
+                added++;
                 const rec = node.studentStudyRecord || null;
-                out.push({
+                const task = {
                     id, name: String(node.name || ''), fileType: String(node.fileType || ''),
                     parentId: String(node.parentId != null ? node.parentId : parentId),
-                    level, nodeLevel: node.level, last: node.last,
+                    level: levelNum(node, level), queryLevel: level,
+                    resourceId: node.resourceId != null ? String(node.resourceId) : '',
+                    fileUrl: String(node.fileUrl || node.fileGenUrl || ''),
+                    typeId: node.typeId != null ? String(node.typeId) : '',
+                    examId: node.examId, last: node.last,
                     kind: kindOf(node),
-                    // 子节点可能是文件夹也可能是学习单元，等扫完再定（见下面的定型）
-                    pending: mayHaveChildren(node, level),
                     done: !!(rec && Number(rec.totalNum) > 0 && Number(rec.actualNum) >= Number(rec.totalNum)),
-                    record: rec, raw: node,
-                });
-                if (mayHaveChildren(node, level)) await walk(id, levelNum(node, level));
+                    record: rec, raw: node, childCount: 0,
+                };
+                out.push(task);
+                // 子级用 level + 1 查；查到了才算文件夹
+                if (level < maxDepth) {
+                    const n = await walk(id, level + 1);
+                    if (n > 0) { task.childCount = n; task.kind = 'folder'; }
+                    else if (task.kind === 'folder') task.kind = kindOf({ resourceId: task.resourceId, fileUrl: task.fileUrl, typeId: task.typeId });
+                }
             }
+            return added;
         };
-        await walk(o.rootParentId != null ? o.rootParentId : 0, 1);
-
-        // 定型：扫到过下级的是文件夹，没扫到下级的是学习单元
-        const parents = new Set();
-        for (const t of out) if (t.parentId) parents.add(String(t.parentId));
-        for (const t of out) {
-            const isFolder = parents.has(t.id) || childCount(t.raw) > 0
-                || t.raw.fileType === '父节点' || t.kind === 'folder';
-            if (isFolder) t.kind = 'folder';
-            else if (t.kind === 'folder') t.kind = 'document';   // 说是父节点但没下级 → 当学习单元
-            t.pending = false;
-        }
+        await walk(o.rootParentId != null ? o.rootParentId : 0, o.rootLevel || 1);
         return out;
     }
 
@@ -1139,7 +1159,7 @@
             try {
                 this.say('读取课程目录…');
                 const tasks = await this.api.scanTree(ctx, {});
-                const targets = tasks.filter(t => t.kind !== 'manual' && t.kind !== 'exam' && t.kind !== 'folder');
+                const targets = tasks.filter(t => t.kind === 'media' || t.kind === 'document');
                 this.state.total = targets.length;
                 this.sync();
                 if (!targets.length) {
@@ -2077,11 +2097,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.4');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.5');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.4',
+        codeVersion: '4.21.5',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
