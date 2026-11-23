@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.3
+// @version      4.21.4
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -525,9 +525,10 @@
         if (n > 0) return n;
         return 100;
     }
-    /** 已知的 fileType 取值（逆向 + 平台实际目录），未知值不再默认当文档 */
+    /** 已知的 fileType 取值。注意：「父节点」「子节点」表示的是目录层级而不是类型，
+     *  资源库里连真正的课件都标成「子节点」，所以这两个值不能进映射表。 */
     const FILE_TYPE_MAP = {
-        '父节点': 'folder', '子节点': 'folder', '文件夹': 'folder',
+        '文件夹': 'folder', 'folder': 'folder',
         'mp4': 'media', 'm4a': 'media', 'mp3': 'media', '视频': 'media', '音频': 'media',
         'pptx': 'document', 'ppt': 'document', 'pdf': 'document', 'docx': 'document', 'doc': 'document',
         'xlsx': 'document', 'xls': 'document', 'txt': 'document', '文档': 'document', '课件': 'document',
@@ -535,17 +536,31 @@
         '讨论': 'manual', 'discuss': 'manual',
     };
     function kindOf(task) {
-        const raw = String((task && (task.fileType || task.type || task.contentType)) || '').trim();
-        if (!raw) return 'unknown';
-        const hit = FILE_TYPE_MAP[raw];
-        if (hit) return hit;
-        const t = raw.toLowerCase();
-        if (FILE_TYPE_MAP[t]) return FILE_TYPE_MAP[t];
+        if (!task) return 'unknown';
+        // 资源库真实目录里 fileType 恒为「子节点」，类型要看 typeId / resourceId / fileUrl
+        const t = String((task.fileType || task.type || task.contentType) || '').trim().toLowerCase();
+        const hit = FILE_TYPE_MAP[t];
+        if (hit && hit !== 'folder') return hit;
+        // 有资源 id 或可下载文件 → 是学习单元，按文件扩展名细分
+        const resId = task.resourceId != null ? String(task.resourceId) : '';
+        const url = String(task.fileUrl || task.fileGenUrl || '');
+        const ext = (url.match(/\.([a-z0-9]{2,5})(?:[?#]|$)/i) || [])[1];
+        if (ext) {
+            const e = ext.toLowerCase();
+            if (/^(mp4|m4a|mp3|flv|mov|avi|wmv|m3u8)$/.test(e)) return 'media';
+            if (/^(ppt|pptx|pdf|doc|docx|xls|xlsx|txt|zip|rar)$/.test(e)) return 'document';
+        }
+        if (resId) {
+            // typeId 在目录里区分课件/视频/作业等，但取值不稳定；有 resourceId 就当可学单元
+            const ty = String(task.typeId != null ? task.typeId : '');
+            if (/^(mp4|m4a|mp3|video|视频)$/.test(ty)) return 'media';
+            return 'document';
+        }
         if (/mp4|m4a|mp3|video|audio|视频|音频/.test(t)) return 'media';
         if (/exam|quiz|work|homework|作业|测验|考试|练习/.test(t)) return 'exam';
         if (/讨论|discuss/.test(t)) return 'manual';
         if (/ppt|pdf|doc|xls|txt|文档|课件/.test(t)) return 'document';
-        // 认不出来就老实说不知道，别默认成文档去提交
+        if (t === '父节点' || t === '子节点' || t === '文件夹' || t === 'folder') return 'folder';
         return 'unknown';
     }
 
@@ -760,13 +775,40 @@
     }
 
     /**
+     * 判断一个节点还能不能往下展开。
+     *
+     * 资源库的真实目录里 fileType 全是「子节点」，没有「父节点」——层级信息在 level 字段。
+     * 早期按 fileType==='子节点' 递归，导致每个真正的学习单元都被当成文件夹，
+     * 逐层空扫后全部被排除，最后剩 0 个可直提。
+     * 现在改为：children 有内容 → 可展开；否则按 level 递增再探一次，探到子节点才认它是文件夹。
+     */
+    const MAX_LEVEL = 6;
+    function levelNum(node, fallback) {
+        const n = Number(node && node.level);
+        return Number.isFinite(n) && n > 0 ? n : fallback;
+    }
+    function childCount(node) {
+        if (!node) return 0;
+        if (Array.isArray(node.children)) return node.children.length;
+        if (Array.isArray(node.courseDesignCellResourceVos)) return node.courseDesignCellResourceVos.length;
+        return 0;
+    }
+    /** 该节点是否还有更深一层（只看结构标记，不发请求） */
+    function mayHaveChildren(node, level) {
+        if (childCount(node) > 0) return true;
+        if (node && node.last === true) return false;
+        return Number(level) < MAX_LEVEL;
+    }
+
+    /**
      * 原始探测：把接口返回的节点原样给出（不做分类），并针对某个节点尝试多种候选 id，
      * 看详情接口到底认哪一个。用来解决「目录能读但 courseContent/{id} 报课件不存在」。
      */
     async function probe(target) {
         const out = { platform: state.platform, levels: [], candidates: [], detailTries: [] };
+        const seen = new Set();
         const walk = async (parentId, level, depth) => {
-            if (depth > 4) return;
+            if (depth > 3) return;
             const raw = await scanOnce(Object.assign({}, target, { parentId, level }));
             const list = Array.isArray(raw) ? raw : [];
             out.levels.push({
@@ -774,28 +816,31 @@
                 fields: list.length ? Object.keys(list[0]) : [],
                 sample: list.slice(0, 3).map(n => ({
                     id: n.id, name: String(n.name || '').slice(0, 30), fileType: n.fileType,
+                    nodeLevel: n.level, last: n.last, children: childCount(n),
                     parentId: n.parentId, examId: n.examId, fileUrl: String(n.fileUrl || '').slice(0, 60),
                     hasRecord: !!n.studentStudyRecord, recordKeys: n.studentStudyRecord ? Object.keys(n.studentStudyRecord) : [],
-                    children: Array.isArray(n.children) ? n.children.length : n.children,
                 })),
             });
             for (const n of list) {
-                const k = String(n.fileType || '');
-                if (k === '父节点' || k === '子节点') await walk(n.id, k === '父节点' ? 1 : 2, depth + 1);
+                const id = String(n.id != null ? n.id : '');
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                if (mayHaveChildren(n, level)) await walk(id, levelNum(n, level), depth + 1);
             }
         };
         await walk(target.parentId || 0, target.level || 1, 0);
 
-        // 拿第一个非文件夹节点，逐个候选 id 打详情接口
+        // 拿一个有文件的节点，逐个候选 id 打详情接口
         const first = (function find() {
-            for (const lv of out.levels) for (const s of lv.sample) {
-                if (s.fileType !== '父节点' && s.fileType !== '子节点') return s;
+            for (const lv of out.levels) {
+                const raw = lv.sample.find(s => s.fileUrl || s.hasRecord);
+                if (raw) return raw;
             }
-            return null;
+            return out.levels.find(l => l.count) ? out.levels.find(l => l.count).sample[0] : null;
         })();
         if (first) {
             const candidates = [first.id];
-            // fileUrl 里可能藏着真正的 fileId
+            // 同名节点会出现在不同 level 上，resourceId 才是资源本身的 id
             const m = String(first.fileUrl || '').match(/([a-f0-9]{20,}|\d{4,})/i);
             if (m) candidates.push(m[1]);
             out.candidates = candidates;
@@ -813,26 +858,38 @@
         const out = [];
         const seen = new Set();
         const walk = async (parentId, level) => {
-            if (level > (o.maxDepth || 6)) return;
+            if (level > (o.maxDepth || MAX_LEVEL)) return;
             const kids = await scanOnce(Object.assign({}, target, { parentId, level }));
             for (const node of kids || []) {
                 const id = String(node.id != null ? node.id : '');
                 if (!id || seen.has(id)) continue;
                 seen.add(id);
-                const type = kindOf(node);
                 const rec = node.studentStudyRecord || null;
                 out.push({
                     id, name: String(node.name || ''), fileType: String(node.fileType || ''),
                     parentId: String(node.parentId != null ? node.parentId : parentId),
-                    level, kind: type,
+                    level, nodeLevel: node.level, last: node.last,
+                    kind: kindOf(node),
+                    // 子节点可能是文件夹也可能是学习单元，等扫完再定（见下面的定型）
+                    pending: mayHaveChildren(node, level),
                     done: !!(rec && Number(rec.totalNum) > 0 && Number(rec.actualNum) >= Number(rec.totalNum)),
                     record: rec, raw: node,
                 });
-                const isFolder = type === 'folder' || node.children === true;
-                if (isFolder || !node.fileType) await walk(id, level + 1);
+                if (mayHaveChildren(node, level)) await walk(id, levelNum(node, level));
             }
         };
         await walk(o.rootParentId != null ? o.rootParentId : 0, 1);
+
+        // 定型：扫到过下级的是文件夹，没扫到下级的是学习单元
+        const parents = new Set();
+        for (const t of out) if (t.parentId) parents.add(String(t.parentId));
+        for (const t of out) {
+            const isFolder = parents.has(t.id) || childCount(t.raw) > 0
+                || t.raw.fileType === '父节点' || t.kind === 'folder';
+            if (isFolder) t.kind = 'folder';
+            else if (t.kind === 'folder') t.kind = 'document';   // 说是父节点但没下级 → 当学习单元
+            t.pending = false;
+        }
         return out;
     }
 
@@ -2020,11 +2077,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.3');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.4');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.3',
+        codeVersion: '4.21.4',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
