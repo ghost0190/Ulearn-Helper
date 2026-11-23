@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.0
+// @version      4.21.1
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -227,31 +227,60 @@
     /* ------------------------------------------------------------------ *
      * 3. 请求与鉴权
      * ------------------------------------------------------------------ */
-    const state = { token: '', bearer: '', platform: PLATFORM, log: [] };
+    const state = { token: '', bearer: '', platform: PLATFORM, log: [], tokenFrom: '' };
     const say = text => { try { env.say(text); } catch (e) { } };
     const trace = (kind, detail) => { state.log.push({ t: Date.now(), kind, detail }); if (state.log.length > 200) state.log.shift(); };
 
+    /** 已知的登录态存放处（三家子站写法不同，全部枚举一遍，宁多勿漏） */
+    const TOKEN_KEYS = ['access_token', 'accessToken', 'token', 'Authorization', 'authorization',
+        'user_token', 'icve_token', 'Admin-Token', 'X-Token', 'satoken', 'jwt'];
+
     function readStoredToken() {
-        const keys = ['access_token', 'token', 'Authorization', 'authorization', 'user_token', 'icve_token'];
         const out = [];
+        const push = (from, value) => {
+            if (typeof value !== 'string') return;
+            const v = value.replace(/^Bearer\s+/i, '').replace(/^"|"$/g, '').trim();
+            // 只保留看起来像 token 的值：JWT、或无空白的长串
+            if (!v || /^(undefined|null|false|0)$/i.test(v)) return;
+            if (/\s/.test(v) && !/^[A-Za-z0-9\-_=.]+\s*$/.test(v)) return;
+            if (v.length < 8) return;
+            if (!out.some(x => x.value === v)) out.push({ from, value: v });
+        };
+        // 1. localStorage 的直接键
         try {
-            for (const key of keys) {
-                const v = win.localStorage.getItem(key);
-                if (v) out.push({ from: 'localStorage:' + key, value: v });
-            }
-            const raw = win.localStorage.getItem('userInfo') || win.localStorage.getItem('user');
-            if (raw) {
-                try {
-                    const obj = JSON.parse(raw);
-                    for (const key of keys) if (obj && typeof obj[key] === 'string') out.push({ from: 'json:' + key, value: obj[key] });
-                } catch (e) { }
+            for (const key of TOKEN_KEYS) push('localStorage:' + key, win.localStorage.getItem(key));
+        } catch (e) { }
+        // 2. localStorage 里的 JSON 容器（userInfo / user / vuex / pinia 持久化…）
+        try {
+            const containers = ['userInfo', 'user', 'userinfo', 'USER_INFO', 'loginInfo', 'vuex', 'store', 'pinia'];
+            for (const c of containers) {
+                const raw = win.localStorage.getItem(c);
+                if (!raw) continue;
+                let obj = null;
+                try { obj = JSON.parse(raw); } catch (e) { continue; }
+                const walk = (node, depth) => {
+                    if (!node || typeof node !== 'object' || depth > 4) return;
+                    for (const key of Object.keys(node)) {
+                        const v = node[key];
+                        if (typeof v === 'string' && TOKEN_KEYS.some(k => k.toLowerCase() === key.toLowerCase())) push('json:' + c + '.' + key, v);
+                        else if (v && typeof v === 'object') walk(v, depth + 1);
+                    }
+                };
+                walk(obj, 0);
             }
         } catch (e) { }
-        const cookie = String(doc.cookie || '');
-        for (const key of keys) {
-            const m = cookie.match(new RegExp('(?:^|;\\s*)' + key + '=([^;]+)'));
-            if (m) out.push({ from: 'cookie:' + key, value: decodeURIComponent(m[1]) });
-        }
+        // 3. sessionStorage（部分版本登录态落在这里）
+        try {
+            for (const key of TOKEN_KEYS) push('sessionStorage:' + key, win.sessionStorage && win.sessionStorage.getItem(key));
+        } catch (e) { }
+        // 4. cookie
+        try {
+            const cookie = String(doc.cookie || '');
+            for (const key of TOKEN_KEYS.concat(['Admin-Token', 'SESSION', 'JSESSIONID'])) {
+                const m = cookie.match(new RegExp('(?:^|;\\s*)' + key + '=([^;]+)'));
+                if (m) push('cookie:' + key, decodeURIComponent(m[1]));
+            }
+        } catch (e) { }
         return out;
     }
     function explicitToken() {
@@ -280,32 +309,67 @@
     }
     /**
      * token → access_token（等价 src/lib/*.py::set_user_auth_token）
-     * 页面里优先用账号自带的 Bearer；拿不到才走 passLogin 兑换。
+     *
+     * 关键：不猜。每个候选都真的打一次接口验证；401 就换下一个。
+     * 原来按长度/JWT 形状猜是不是 Bearer，猜错就一路错到底（实测站点返回 401 令牌不能为空）。
      */
     async function ensureAuth() {
         if (state.bearer) return true;
-        const candidates = readStoredToken();
+        const seen = new Set();
+        const candidates = [];
+        const add = item => {
+            if (!item || !item.value || seen.has(item.value)) return;
+            seen.add(item.value);
+            candidates.push(item);
+        };
         const explicit = explicitToken();
-        if (explicit) candidates.unshift({ from: 'config', value: explicit });
-        if (!candidates.length) { say('未在页面存储中找到 token，请在设置里填写 ICVE Token'); return false; }
-        for (const item of candidates) {
-            const value = String(item.value || '').replace(/^Bearer\s+/i, '').trim();
-            if (!value) continue;
-            // 值本身像 access_token（平台签发的 JWT/长串）就直接用，避免多余兑换
-            if (/^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+$/.test(value) || value.length > 40) {
-                state.token = value; state.bearer = value;
-                trace('auth.direct', item.from);
-                return true;
-            }
-            const r = await call(HOSTS[state.platform] + '/prod-api/auth/passLogin?token=' + encodeURIComponent(value));
-            if (r.json && r.json.code === 200 && r.json.data && r.json.data.access_token) {
-                state.token = value;
-                state.bearer = r.json.data.access_token;
-                trace('auth.passLogin', item.from);
-                return true;
-            }
+        if (explicit) add({ from: 'config', value: explicit });
+        const stored = readStoredToken();
+        stored.forEach(add);
+        if (!candidates.length) {
+            say('未找到登录 token：请先在该平台正常登录，或在设置里填写 ICVE Token');
+            return false;
         }
-        say('token 兑换 access_token 失败');
+
+        // 用一个最轻量的接口探活，判定某个候选是否真的可用
+        const probeUrl = () => {
+            if (state.platform === 'zyk') return HOSTS.zyk + '/prod-api/teacher/courseList/myCourseList?pageNum=1&pageSize=1&flag=1';
+            if (state.platform === 'zjy2') return HOSTS.zjy2 + '/prod-api/spoc/courseInfoStudent/myCourseList?pageNum=1&pageSize=1';
+            if (state.platform === 'ai') return HOSTS.ai + '/prod-api/course/courseInfo/myCourse?queryType=1&pageSize=1&pageNum=1';
+            return '';
+        };
+        const works = async (value, mode) => {
+            const saved = { bearer: state.bearer, token: state.token };
+            state.bearer = mode === 'bearer' ? value : '';
+            state.token = value;
+            try {
+                const r = await call(probeUrl(), { headers: authHeaders() });
+                if (r.json && Number(r.json.code) === 200) return true;
+                return false;
+            } catch (e) { return false; } finally {
+                state.bearer = saved.bearer; state.token = saved.token;
+            }
+        };
+
+        for (const item of candidates) {
+            const value = item.value;
+            // 依次尝试两种用法：值本身是 access_token（Bearer），或值是 sso token（需 passLogin 兑换）
+            if (await works(value, 'bearer')) {
+                state.token = value; state.bearer = value; state.tokenFrom = item.from + ' (bearer)';
+                trace('auth.ok', { from: item.from, mode: 'bearer' });
+                return true;
+            }
+            try {
+                const r = await call(HOSTS[state.platform] + '/prod-api/auth/passLogin?token=' + encodeURIComponent(value));
+                const access = r.json && Number(r.json.code) === 200 && r.json.data && r.json.data.access_token;
+                if (access && await works(access, 'bearer')) {
+                    state.token = value; state.bearer = access; state.tokenFrom = item.from + ' (passLogin)';
+                    trace('auth.ok', { from: item.from, mode: 'passLogin' });
+                    return true;
+                }
+            } catch (e) { trace('auth.passLogin.error', String(e && e.message || e)); }
+        }
+        say('已找到 ' + candidates.length + ' 个候选 token，但都被服务器拒绝（可在设置里手填 ICVE Token）');
         return false;
     }
 
@@ -819,6 +883,8 @@
             }
             const btn = document.getElementById('ul_icve_run');
             if (btn) btn.disabled = this.state.running;
+            const one = document.getElementById('ul_icve_onekey');
+            if (one) { one.disabled = this.state.running; one.textContent = this.state.running ? '直提中…' : '一键直提'; }
             const stop = document.getElementById('ul_icve_stop');
             if (stop) stop.hidden = !this.state.running;
         },
@@ -837,14 +903,37 @@
                 }
                 return '';
             };
+            // 页面 URL 常常只带 id，courseInfoId 藏在路由参数或 Vuex 里，逐层兜底
+            const params = (function () {
+                try { return (vm && vm.$route && vm.$route.query) || {}; } catch (e) { return {}; }
+            })();
+            const store = (function () {
+                try {
+                    const g = vm && vm.$store && vm.$store.getters;
+                    return (g && (g.courseInfo || g.course)) || {};
+                } catch (e) { return {}; }
+            })();
+            const deep = (...keys) => {
+                for (const src of [params, store, info]) {
+                    for (const k of keys) {
+                        const v = src && src[k];
+                        if (v != null && String(v) !== '') return String(v);
+                    }
+                }
+                return '';
+            };
             const base = {
-                courseInfoId: q('courseInfoId') || pick('courseInfoId', 'id'),
-                courseId: q('courseId') || pick('courseId'),
-                classId: q('classId') || pick('classId'),
-                studentId: pick('studentId', 'userId') || String($w.currentUserId || ''),
+                courseInfoId: q('courseInfoId') || deep('courseInfoId', 'courseInfoid') || pick('courseInfoId', 'id'),
+                courseId: q('courseId') || deep('courseId', 'courseid') || pick('courseId'),
+                classId: q('classId') || deep('classId', 'classid') || pick('classId'),
+                studentId: pick('studentId', 'userId') || String($w.currentUserId || '') || deep('userId', 'id'),
+                // 资源库里还有一组 id：课程首页的 id 与 courseInfoId 并不总是同一个
+                id: q('id') || '',
                 token: '',
             };
             try { base.token = String(ConfigStore.get().sources.icveToken || '').trim(); } catch (e) { }
+            // 资源库课程首页只有 id，先当作 courseInfoId 交上去，resolveTarget 会再从课程列表纠正
+            if (!base.courseInfoId && base.id && this.api && this.api.platform === 'zyk') base.courseInfoId = base.id;
             return base.courseInfoId || base.courseId ? base : null;
         },
 
@@ -871,8 +960,13 @@
         /** 学习：整门课直提 */
         async run() {
             if (this.busy) { this.say('正在执行，请先停止'); return; }
-            if (!this.enabled()) { this.say('协议直提已在设置里关闭'); return; }
-            if (!(await this.ensureReady())) return;
+            if (!this.enabled()) { this.state.message = '协议直提已在设置里关闭'; this.sync(); return; }
+            // 前置条件不满足时，直接把诊断结论贴出来，而不是只回一行"失败"
+            if (!(await this.ensureReady())) {
+                const lines = await this.diagnose();
+                this.toast(lines.join(' ｜ '));
+                return;
+            }
             const ctx = this.context();
             this.busy = true;
             this.state.running = true;
@@ -881,24 +975,38 @@
             this.controller = new AbortController();
             this.sync();
             try {
+                this.say('读取课程目录…');
                 const tasks = await this.api.scanTree(ctx, {});
                 const targets = tasks.filter(t => t.kind !== 'manual' && t.kind !== 'exam' && t.kind !== 'folder');
                 this.state.total = targets.length;
                 this.sync();
-                this.say('共 ' + targets.length + ' 个可直提任务，开始提交…');
+                if (!targets.length) {
+                    this.say('目录里没有可直提的任务（共 ' + tasks.length + ' 个节点，作业/讨论/文件夹不计）');
+                    this.toast('没有可直提的任务');
+                    return;
+                }
+                const pending = targets.filter(t => !t.done);
+                this.say('共 ' + targets.length + ' 个可直提，已完成 ' + (targets.length - pending.length) + '，本次提交 ' + pending.length + ' 个');
                 const results = [];
-                for (const t of targets) {
+                const todo = pending.length ? pending : [];
+                if (!todo.length) {
+                    this.say('全部任务都已完成，无需提交');
+                    this.toast('全部已完成');
+                    return;
+                }
+                for (const t of todo) {
                     if (this.controller.signal.aborted) break;
                     const r = await this.api.studyOnce(Object.assign({}, ctx, { task: t.raw, parentId: t.parentId }));
                     results.push(Object.assign({ id: t.id, name: t.name, kind: t.kind }, r));
                     this.state.done++;
-                    this.say('[' + this.state.done + '/' + this.state.total + '] ' + String(t.name).slice(0, 24) + '：'
+                    this.say('[' + this.state.done + '/' + todo.length + '] ' + String(t.name).slice(0, 24) + '：'
                         + (r.ok ? (r.verified ? '服务器已确认' : '已提交') : '失败 ' + (r.reason || '')));
                     this.sync();
                     if (this.delay()) await new Promise(res => setTimeout(res, this.delay()));
                 }
                 const summary = {
                     total: tasks.length,
+                    alreadyDone: targets.length - pending.length,
                     submitted: results.filter(r => r.accepted).length,
                     verified: results.filter(r => r.verified).length,
                     failed: results.filter(r => !r.ok).map(r => ({ id: r.id, name: r.name, reason: r.reason })),
@@ -906,11 +1014,15 @@
                 };
                 this.state.summary = summary;
                 this.state.lastRun = results;
-                this.say('完成：确认 ' + summary.verified + ' / 提交 ' + summary.submitted + ' / 失败 ' + summary.failed.length);
+                const text = '完成：本次确认 ' + summary.verified + ' / 提交 ' + summary.submitted
+                    + ' / 失败 ' + summary.failed.length + '（原有已完成 ' + summary.alreadyDone + '）';
+                this.say(text);
+                this.toast(text);
                 console.log('[Ulearn-Helper][icve] 直提结果', results);
                 return summary;
             } catch (e) {
                 this.say('执行异常：' + String(e && e.message || e));
+                this.toast('执行异常，详见控制台');
                 console.error('[Ulearn-Helper][icve] 直提异常', e);
             } finally {
                 this.busy = false;
@@ -919,9 +1031,72 @@
             }
         },
 
+        toast(text) {
+            try {
+                if (typeof UI !== 'undefined' && UI.toast) UI.toast(String(text).slice(0, 200), 'ok');
+            } catch (e) { }
+        },
+
         stop() {
             if (this.controller) this.controller.abort();
             this.say('已请求停止');
+        },
+
+        /**
+         * 诊断：把「能不能刷」拆成四步分别验证，每步给出可读结论。
+         * 不做猜测——token 是真的打接口验证通过的才往下走。
+         */
+        async diagnose() {
+            const lines = [];
+            const add = (ok, text) => { lines.push((ok ? '✓ ' : '✗ ') + text); console.log('[Ulearn-Helper][icve][diag] ' + (ok ? 'OK ' : 'FAIL ') + text); };
+            add(true, '域名 ' + location.hostname + ' → 平台 ' + (this.api ? (this.api.platform || '(未知)') : '(未初始化)'));
+
+            if (!this.api) {
+                add(false, '当前不是智慧职教页面，协议层未初始化');
+                this.say(lines.join('\n'));
+                return lines;
+            }
+            if (!this.api.platform) {
+                add(false, '无法判定子站（zkj/zjy2/ai/mooc），协议接口路径不适用');
+                this.say(lines.join('\n'));
+                return lines;
+            }
+
+            // ① 找到哪些 token
+            let candidates = [];
+            try { candidates = this.api.readStoredToken() || []; } catch (e) { }
+            add(candidates.length > 0, '页面登录态里找到 ' + candidates.length + ' 个候选 token'
+                + (candidates.length ? '：' + candidates.map(c => c.from).join('、') : '（需要先在该平台登录，或手填 ICVE Token）'));
+
+            // ② 鉴权是否真的通过（内部会逐个实测）
+            const authOk = await this.api.ensureAuth();
+            add(authOk, authOk ? '鉴权通过（来源：' + (this.api.state.tokenFrom || '未知') + '）' : '鉴权失败：所有候选 token 都被服务器拒绝');
+
+            // ③ 课程参数
+            const ctx = this.context();
+            add(!!ctx, ctx ? '课程参数：courseInfoId=' + (ctx.courseInfoId || '-') + ' courseId=' + (ctx.courseId || '-')
+                + ' classId=' + (ctx.classId || '-') : '读不到课程参数：请在课程目录页或课件页点击');
+
+            if (!authOk || !ctx) {
+                add(false, '前置条件未满足，已停止（不会发任何提交请求）');
+                this.say(lines.join('\n'));
+                return lines;
+            }
+
+            // ④ 目录能不能读
+            let tasks = [];
+            try { tasks = await this.api.scanTree(ctx, {}) || []; } catch (e) { add(false, '目录读取异常：' + (e && e.message || e)); }
+            if (tasks.length) {
+                const g = k => tasks.filter(t => t.kind === k).length;
+                add(true, '目录读取成功：共 ' + tasks.length + ' 个节点（视频/音频 ' + g('media')
+                    + '、文档 ' + g('document') + '、作业 ' + g('exam') + '、讨论 ' + g('manual') + '、文件夹 ' + g('folder') + '）');
+                add(true, '其中已完成 ' + tasks.filter(t => t.done).length + ' 个，可直提 '
+                    + tasks.filter(t => t.kind === 'media' || t.kind === 'document').length + ' 个');
+            } else if (!tasks.length) {
+                add(false, '目录为空或读取失败（可能是页面还没加载完，或该课程目录接口结构不同）');
+            }
+            this.say(lines.join('\n'));
+            return lines;
         },
 
         /** 统一问答案：本地题库 → 远程库 → 后端 → AI（沿用来源设置） */
@@ -1695,11 +1870,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.0');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.1');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.0',
+        codeVersion: '4.21.1',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
@@ -5484,10 +5659,19 @@
             this.$rateText.find('input').val(savedRate);
             let $row = jquery('<div class="ul-study-row" id="ul_study_row"></div>');
             $row.append(this.$startBtn).append(this.$stopBtn).append(this.$rateText);
+            // 智慧职教：一键协议直提（不放设置里，主面板直接给按钮）
+            if (typeof IS_ICVE !== 'undefined' && IS_ICVE && typeof IcveDirect !== 'undefined') {
+                const $oneKey = jquery('<button type="button" class="ul-btn ul-btn-primary" id="ul_icve_onekey">一键直提</button>');
+                const $diag = jquery('<button type="button" class="ul-btn" id="ul_icve_diag">诊断</button>');
+                $oneKey.on('click', () => { IcveDirect.run(); });
+                $diag.on('click', () => { IcveDirect.diagnose(); });
+                $row.append($oneKey).append($diag);
+            }
             const dashboardBtn=jquery('<button type="button" class="ul-btn" id="ul_study_dashboard">学习面板</button>');
             dashboardBtn.on('click',()=>{if(typeof StudyDashboard!=='undefined')StudyDashboard.open(true);});
             $row.append(dashboardBtn);
             $row.append(jquery('<span class="ul-study-state" id="ul_study_state">未开始</span>'));
+            $row.append(jquery('<span class="ul-icve-state" id="ul_icve_state"></span>'));
             try {
                 let $tools = jquery('.ul-panel .ul-tools');
                 if ($tools.length) $tools.after($row);
