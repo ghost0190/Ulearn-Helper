@@ -3,8 +3,8 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.20.0
-// @description  Ulearn-Helper v4.20.0：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
+// @version      4.20.1
+// @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
 // @updateURL    https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.meta.js
@@ -60,6 +60,8 @@
     let nativeNodes = new Map(), completedIds = null;
     let seekPending = false;
     let legacyDirectory = { substanceList: [] };
+    let resource = null, resourceRead = null, resourceNavigation = null;
+    const loadedResourceTrees = new WeakSet();
     const ownedMedia = new Set();
     const clean = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const visible = el => !!(el && el.isConnected && el.getClientRects().length &&
@@ -70,8 +72,8 @@
         }
         return null;
     };
-    function documents() {
-        const out = [doc];
+    function documents(root = doc) {
+        const out = [root];
         for (let i = 0; i < out.length && i < 10; i++) for (const frame of out[i].querySelectorAll('iframe')) {
             try { if (visible(frame) && frame.contentDocument && !out.includes(frame.contentDocument) && out.length < 10) out.push(frame.contentDocument); } catch (e) { }
         }
@@ -90,17 +92,48 @@
         }
         return null;
     }
+    function resourceRoute(url) {
+        try {
+            const u = new URL(url || win.location.href);
+            if (u.hostname !== 'zyk.icve.com.cn') return null;
+            const match = u.pathname.match(/^(?:\/icve-study)?\/coursePreview\/(courseIndex|courseware)\/?$/i);
+            if (!match) return null;
+            return { overview: match[1].toLowerCase() === 'courseindex', id: clean(u.searchParams.get('id')),
+                project: clean(u.searchParams.get('projectGroupId')), courseInfoId: clean(u.searchParams.get('courseInfoId')) };
+        } catch (e) { return null; }
+    }
     function assessment(url) {
         let path;
         try { const u = new URL(url || win.location.href); path = u.pathname + u.hash.split('?')[0]; }
         catch (e) { path = String(url || ''); }
-        return /(?:^|[/#_.-])(?:preview-exam|review-exam|exam|homework|test|quiz|paper|answer|work)(?:[/#_.-]|$)/i.test(path);
+        return /(?:^|[/#_.-])(?:preview-exam|review-exam|exam|homework|test|quiz|paper|answer|work|seejob|seeexam|todofilejob|tasktest|jobtest|keeptest|examination)(?:[/#_.-]|$)/i.test(path);
     }
     function study(url) {
         const u = String(url || win.location.href);
         if (assessment(u)) return false;
-        // A catalogue/preview route alone is insufficient to start playing resources.
+        if (/^https:\/\/zyk\.icve\.com\.cn\/(?:icve-study\/)?coursePreview\//i.test(u)) return !!resourceRoute(u);
         return /\/excellent-study\/|\/learnspace\/learn\//i.test(u) || /\/(?:study|learning|coursePreview|coursePreviewIndex|classroomNow|guide|teach)(?:[/?.#]|$)/i.test(u);
+    }
+    function resourceContext(route) {
+        const accept = vm => Array.isArray(vm.list) && typeof vm.enter === 'function';
+        const catalog = route.overview ? findVM('.coursePreviewIndex > .courseDataTree, .coursePreviewIndex', accept) :
+            findVM('.kejianList .coursePreviewIndex > .catalogTree, .kejianList .coursePreviewIndex', accept);
+        const view = route.overview ? null : findVM('.courseware', vm => 'designData' in vm && vm.$refs);
+        const candidate = view?.$refs.FilePreView || (!route.overview && findVM('.guide', vm => vm.designData && typeof vm.sendRecord === 'function'));
+        const viewer = candidate && !view?.loadingFlag && String(candidate.designData?.id || '') === route.id ? candidate : null;
+        const context = catalog || view || viewer || findVM('.coursePreviewIndex', vm => !!vm.$store?.getters?.courseInfo);
+        const storeInfo = context?.$store?.getters?.courseInfo || {};
+        const catalogInfo = catalog?.courseInfo || {};
+        const id = clean(route.courseInfoId || catalogInfo.courseInfoId || catalogInfo.id || storeInfo.courseInfoId || storeInfo.id);
+        const project = clean(catalogInfo.projectGroupId || storeInfo.projectGroupId);
+        const courseChanged = route.project && project && route.project !== project;
+        const catalogChanged = route.courseInfoId && catalogInfo.courseInfoId && route.courseInfoId !== clean(catalogInfo.courseInfoId);
+        return { route, catalog: courseChanged || catalogChanged ? null : catalog, viewer: courseChanged ? null : viewer,
+            key: id && !courseChanged ? 'zyk|' + id : '', name: clean(catalogInfo.courseName || storeInfo.courseName || storeInfo.courseInfoName),
+            archived: Number(storeInfo.archive ?? catalogInfo.archive) === 1 };
+    }
+    function resourceFolder(item) {
+        return String(item.parentId) === '0' || /^(?:父节点|子节点|章节|文件夹|folder|chapter|目录|节点)$/.test(clean(item.fileType));
     }
     function identity(dir) {
         const route = dir && dir.$route, params = route && route.params || {};
@@ -124,12 +157,14 @@
         revision++;
         if (task && task.controller) task.controller.abort();
         task = null;
+        resourceNavigation = null;
         pauseMedia();
     }
     function reset(key, dir) {
         const changed = !!courseKey && key !== courseKey;
         stop(); courseKey = key; directory = dir;
         pages = new Map(); sections = new Map(); loads = new Map(); loading = null;
+        resourceRead = null;
         chapters = []; rows = []; partial = true; activeId = ''; nextAt = 0;
         if (changed && env.running()) env.halt('课程已切换，请确认新课程后开始');
     }
@@ -137,6 +172,12 @@
         return nativeNodes.get(String(id)) || null;
     }
     function completion(item, dir) {
+        if (resource) {
+            const detail = resource.viewer?.designData;
+            const record = item.studentStudyRecord || (String(detail?.id || '') === String(item.id) ? detail.studentStudyRecord : null);
+            // The resource library renders the same speed field in its course directory.
+            return { known: !!(dir || record) && !resource.archived, complete: Number(record?.speed) >= 100 };
+        }
         if (completedIds) return { known: true, complete: completedIds.has(String(item.id)) };
         const el = nodeFor(item.id);
         if (el && el.querySelector('i.jd')) return { known: true, complete: !!el.querySelector('i.jd.wc') };
@@ -149,8 +190,13 @@
         if (el && el.querySelector('.done_icon_show')) return { known: true, complete: true };
         return { known: false, complete: false };
     }
-    function typeOf(item) {
+    function typeOf(item, dir) {
         const n = Number(item.nrlx), file = clean(item.fileType).toLowerCase();
+        if (resource) {
+            const matchesFile = list => Array.isArray(list) && list.some(type => clean(type).toLowerCase() === file);
+            if (matchesFile(dir?.videoTypeList) || matchesFile(dir?.audioTypeList) || /^(?:mov|m4v|webm|m4a|aac|flac|音乐)$/.test(file)) return 'media';
+            if (matchesFile(dir?.imageTypeList) || /^(?:图文|富文本|txt|rtf|wpt|dps|xlsx?|jpg|jpeg|png|gif|tiff?|bmp)$/.test(file)) return 'document';
+        }
         if ([2, 11].includes(n) || /^(?:media|video|audio|mp4|mp3|m3u8|wav|视频|音频)$/.test(file)) return 'media';
         if ([4, 5, 6].includes(n) || /^(?:exam|quiz|work)$/.test(file) || /作业|测验|考试|练习/.test(file)) return 'practice';
         if ([7, 15].includes(n) || /讨论|任务/.test(file)) return 'manual';
@@ -158,6 +204,7 @@
         return 'unknown';
     }
     function currentResource() {
+        if (resource) return resource.route.id;
         const content = findVM('.contentBox, .guide, .teach', vm => vm.nrdata || vm.cellData || vm.currentCell);
         const item = content && (content.nrdata || content.cellData || content.currentCell);
         const active = queryAll('.panelList .node.active, .s_point.s_pointerct')[0];
@@ -173,36 +220,50 @@
         const now = Date.now(), route = win.location.href;
         if (!force && route === observedRoute && now - lastSync < 350) return;
         const leftStudy = observedRoute && study(observedRoute) && !study(route);
+        const previousResource = resource;
         observedRoute = route; lastSync = now;
         if (leftStudy) { stop(); if (env.running()) env.halt('已离开课件页，学习已暂停'); }
-        let dir = findVM('#kcnr, .coursePreviewIndex', vm => Array.isArray(vm.substanceList) || Array.isArray(vm.list));
-        const moocNodes = dir ? [] : queryAll('.s_point[itemtype]');
+        const routeInfo = resourceRoute(route);
+        resource = routeInfo ? resourceContext(routeInfo) : null;
+        let dir = resource ? resource.catalog : findVM('#kcnr, .coursePreviewIndex', vm => Array.isArray(vm.substanceList) || Array.isArray(vm.list));
+        const moocNodes = dir || resource ? [] : queryAll('.s_point[itemtype]');
         if (!dir && moocNodes.length) {
             legacyDirectory.substanceList = moocNodes.map((el, i) => ({ id: el.id || el.getAttribute('itemid') || 'mooc-' + i,
                 name: el.title || el.querySelector('.s_pointti')?.title || clean(el.textContent), fileType: el.getAttribute('itemtype'),
                 nativeNode: el }));
             dir = legacyDirectory;
         }
-        if (!dir && study() && mediaNodes().length) {
+        if (!dir && !resource && study() && mediaNodes().length) {
             const u = new URL(win.location.href), media = mediaNodes()[0];
             const id = u.searchParams.get('cellId') || u.searchParams.get('id') || 'current-page-media';
             legacyDirectory.substanceList = [{ id, name: doc.title || '当前页媒体', nrlx: media.tagName === 'AUDIO' ? 11 : 2 }];
             legacyDirectory.iviewNr = { id };
             dir = legacyDirectory;
         }
-        const key = identity(dir);
-        if (key !== courseKey || directory && dir && directory !== dir) reset(key, dir);
+        const key = resource ? resource.key : identity(dir);
+        if ((key && key !== courseKey) || (!resource && directory && dir && directory !== dir)) reset(key, dir);
+        // A router transition replaces the catalogue and player VMs within the same course.
+        if (resource && previousResource && previousResource.route.id !== resource.route.id && task) stop();
+        if (resourceNavigation && resource?.viewer && resource.route.id === resourceNavigation.id) resourceNavigation = null;
         directory = dir;
         nativeNodes = new Map(queryAll('.panelList .node, .coursePreviewIndex [id], .h_cells a')
             .map(el => [String(el.id || el.getAttribute('data-id')), el]));
         completedIds = Array.isArray(dir && dir.studyCourseware) ? new Set(dir.studyCourseware.map(String)) : null;
         const namedLegacyNodes = new Map(queryAll('.coursePreviewIndex .fIteml, .coursePreviewIndex .iChild, .coursePreviewIndex .items')
             .map(el => [clean(el.textContent).replace(/\s/g, ''), el]));
+        if (resourceRead && resourceRead.dir === dir && !dir.loading && dir.list !== resourceRead.before) {
+            loadedResourceTrees.add(dir);
+            resourceRead = null;
+        }
+        if (resource && dir?.isProgress === '1' && !dir.loading && dir.list.length) loadedResourceTrees.add(dir);
+        const viewerItem = resource?.viewer?.designData;
         const list = dir && (dir.substanceList || dir.list);
+        const sourceItems = viewerItem && (!list || !list.length) ? [viewerItem] : list;
         rows = []; chapters = []; partial = !Array.isArray(list) || !list.length;
-        if (!Array.isArray(list)) return;
+        activeId = currentResource();
+        if (!Array.isArray(sourceItems)) return;
         const visited = new Set();
-        const walk = (items, title, chapterSections, path, depth) => {
+        const walk = (items, title, chapterSections, path, depth, parentBlocked = false) => {
             if (depth > 12 || visited.size > 3000) { partial = true; return; }
             for (const item of items) {
                 if (!item || !item.id || visited.has(String(item.id))) continue;
@@ -215,25 +276,31 @@
                     const native = namedLegacyNodes.get(expected);
                     if (native) nativeNodes.set(id, native);
                 }
-                const resource = Number(item.nrlx) > 0 || !!item.fileType && !/^(?:folder|chapter|目录|章节|节点|父节点|子节点)$/i.test(item.fileType);
-                if (!resource) {
-                    if (children.length) walk(children, name, chapterSections, path.concat(name), depth + 1);
-                    else {
+                const leaf = resource ? !resourceFolder(item) : Number(item.nrlx) > 0 || !!item.fileType && !/^(?:folder|chapter|目录|章节|节点|父节点|子节点)$/i.test(item.fileType);
+                const blocked = parentBlocked || !!resource && (item.isLook === false || item.isLook === 0 || item.isLook === '0' ||
+                    !!item.endTime && Number.isFinite(Date.parse(item.endTime)) && now > Date.parse(item.endTime));
+                if (!leaf) {
+                    if (children.length) walk(children, name, chapterSections, path.concat(name), depth + 1, blocked);
+                    else if (!resource || !loadedResourceTrees.has(dir) && !loads.get(id)?.empty) {
                         partial = true;
                         let load = loads.get(id);
                         if (!load) { load = { id, item, attempts: 0, retryAt: 0, done: false }; loads.set(id, load); }
                         load.item = item; load.seen = true;
                         chapterSections.push({ name: () => name, pages: () => null });
+                    } else if (loads.get(id)?.empty) {
+                        loads.get(id).seen = true;
                     }
                     continue;
                 }
+                if (resource && Number(item.isTaskPoint) === 0 && item.isTaskPoint != null && item.isTaskPoint !== '') continue;
                 const status = completion(item, dir);
                 let page = pages.get(id);
                 if (!page) {
                     page = { id: () => id, name: () => page.title, record: () => ({ status: () => page.complete ? 1 : 0 }) };
                     pages.set(id, page);
                 }
-                Object.assign(page, { raw: item, title: name, known: status.known, complete: status.complete, type: typeOf(item) });
+                const type = typeOf(item, dir);
+                Object.assign(page, { raw: item, title: name, known: status.known, complete: status.complete, type, blocked });
                 let section = sections.get(id);
                 if (!section) {
                     section = { name: () => section.title, pages: () => [page], isRecordLoaded: () => page.known };
@@ -245,28 +312,51 @@
             }
         };
         for (const load of loads.values()) load.seen = false;
-        for (const item of list) {
+        for (const item of sourceItems) {
+            if (!item) continue;
             const chapterSections = [], title = clean(item.name || item.title || '课程内容');
             const start = rows.length;
             walk([item], title, chapterSections, [], 0);
             const chapter = { name: () => title, sections: () => chapterSections };
-            chapters.push(chapter);
+            if (!resource || chapterSections.length) chapters.push(chapter);
             for (let i = start; i < rows.length; i++) rows[i].chapter = chapter;
         }
+        if (resource && sourceItems !== list) chapters.push({ sections: () => [{ pages: () => null }] });
         for (const [id, load] of loads) if (!load.seen) loads.delete(id);
-        activeId = currentResource();
     }
     function loadDirectory(retry) {
         sync(); settleLoad();
         if (retry) for (const load of loads.values()) { load.attempts = 0; load.retryAt = 0; }
-        if (!study() || !directory || loading || !loads.size) return;
+        if (!study() || !directory || resource && !resource.key) return;
+        if (resource && retry && !resource.route.overview) {
+            if (readResourceTree()) env.say('正在重新读取资源库进度');
+            return;
+        }
+        if (resource && retry && !directory.list.length && typeof directory.getList === 'function') {
+            try { directory.getList(); env.say('正在重新读取资源库课程目录'); } catch (e) { }
+            return;
+        }
+        if (!loads.size) return;
+        if (resource && resource.route.overview && (retry || !loadedResourceTrees.has(directory)) && !directory.isExpand && !directory.loading) {
+            if (readResourceTree()) {
+                if (!task) env.say('正在读取资源库课程目录');
+                return;
+            }
+        }
+        if (loading || (resourceRead && resourceRead.dir === directory && Date.now() < resourceRead.until)) return;
         const now = Date.now(), load = Array.from(loads.values()).find(x => x.attempts < 3 && x.retryAt <= now);
         if (!load) return;
         const generation = revision;
         load.attempts++; load.retryAt = now + 10000;
-        loading = { load, generation, since: now };
-        env.say('正在读取目录：' + clean(load.item.name || '章节') + '（' + load.attempts + '/3）');
+        loading = { load, generation, since: now, before: load.item.children };
+        if (!task) env.say('正在读取目录：' + clean(load.item.name || '章节') + '（' + load.attempts + '/3）');
         try {
+            if (resource && typeof directory.getMoreList === 'function') {
+                const level = String(load.item.parentId) === '0' ? 1 : clean(load.item.fileType) === '文件夹' ? 3 : 2;
+                const result = directory.getMoreList(level, load.item);
+                if (result && typeof result.catch === 'function') result.catch(() => {});
+                return;
+            }
             const folder = folderNode(load);
             const arrow = folder && folder.querySelector('.one-title .jiantou, .two-title .jiantou, .three-title .jiantou');
             const toggle = arrow || folder && (folder.matches('.items') ? folder : folder.querySelector('.panel-title, .el-tree-node__expand-icon:not(.expanded)'));
@@ -285,12 +375,51 @@
     }
     function settleLoad() {
         if (!loading) return;
+        if (resource && loads.has(loading.load.id) && Array.isArray(loading.load.item.children) && loading.load.item.children !== loading.before) {
+            loading.load.empty = !loading.load.item.children.length;
+            loading = null;
+            lastSync = 0;
+            return;
+        }
         if (loading.generation !== revision || !loads.has(loading.load.id) || Date.now() - loading.since >= 8000) loading = null;
+    }
+    function readResourceTree() {
+        const dir = resource?.catalog;
+        if (!dir || typeof dir.expandModules !== 'function') return false;
+        if (resourceRead?.dir === dir && Date.now() < resourceRead.until) return false;
+        resourceRead = { dir, before: dir.list, until: Date.now() + 5000 };
+        try {
+            const result = dir.expandModules();
+            if (result && typeof result.catch === 'function') result.catch(() => {});
+            return true;
+        } catch (e) { return false; }
+    }
+    function selectResource(page) {
+        const dir = resource.catalog;
+        if (!resource.key || !dir) { env.say('资源库目录正在加载，请稍候'); return false; }
+        if (page.blocked) { env.say('该课件暂未开放或已过学习期限：' + page.title); return false; }
+        if (resourceNavigation?.id === page.id()) return false;
+        stop();
+        resourceNavigation = { id: page.id(), until: Date.now() + 20000 };
+        try {
+            const result = dir.enter(page.raw);
+            if (result && typeof result.catch === 'function') result.catch(() => {
+                if (resourceNavigation?.id !== page.id()) return;
+                resourceNavigation = null;
+                env.halt('资源库未能打开课件：' + page.title);
+            });
+            return true;
+        } catch (e) {
+            resourceNavigation = null;
+            env.say('资源库未能打开课件：' + page.title);
+            return false;
+        }
     }
     function select(page, force) {
         sync(true);
-        if (!page || !pages.has(page.id()) || !study()) return false;
+        if (!page || !rows.some(row => row.page === page) || !study()) return false;
         if (!force && activeId === page.id()) return true;
+        if (resource) return selectResource(page);
         const target = nodeFor(page.id());
         if (target) {
             if (target.disabled || target.getAttribute('aria-disabled') === 'true' || target.matches('.is-disabled, .disabled')) {
@@ -306,7 +435,7 @@
     const facade = {
         course: { chapters: () => { sync(); return chapters; }, name: () => {
             sync();
-            return clean(directory && (directory.courseName || directory.courseInfo && directory.courseInfo.name) ||
+            return clean(resource?.name || directory && (directory.courseName || directory.courseInfo && directory.courseInfo.name) ||
                 doc.querySelector('.course-name, .courseName, .course-title')?.textContent || doc.title || '智慧职教学习进度');
         } },
         currentPage: () => { sync(); return pages.get(activeId) || null; },
@@ -315,19 +444,43 @@
         selectPage: page => select(page)
     };
     function mediaNodes() {
+        if (resource && !resource.viewer?.$el) return [];
         const found = [];
-        for (const scope of documents()) {
+        for (const scope of documents(resource?.viewer?.$el || doc)) {
             for (const media of scope.querySelectorAll('video, audio')) {
                 const player = media.closest('.contentBox, .FilePreview, .guide, .teach');
                 const rendered = visible(media) || media.tagName === 'AUDIO' && visible(player);
                 if (media.closest(ignored) || !rendered) continue;
-                if (player || scope !== doc || !scope.querySelector('.contentBox, .FilePreview, .guide, .teach') && study()) found.push(media);
+                if (resource || player || scope !== doc || !scope.querySelector('.contentBox, .FilePreview, .guide, .teach') && study()) found.push(media);
             }
         }
         return found;
     }
     function status(text) { if (task) task.message = text; env.say(text); }
+    function waitForResourceRecord(reason) {
+        const now = Date.now();
+        if (!task.awaiting) {
+            task.awaiting = now;
+            task.refreshAt = now + 1200;
+        }
+        if (now - task.awaiting >= 32000) {
+            env.halt('资源库尚未确认保存，请查看原课件的学习进度后重试');
+            return;
+        }
+        status(reason + '，正在核对资源库学习进度');
+        if (task.refreshes >= 3 || now < task.refreshAt) return;
+        const viewer = resource.viewer;
+        if (!viewer) return;
+        // Ask the viewer to save the progress reported by its own playback and page-change events.
+        if (typeof viewer.sendRecord === 'function' && String(viewer.recordQuery?.sourceId) === task.page.id()) {
+            try { viewer.sendRecord(); } catch (e) { }
+        }
+        task.refreshes++;
+        task.refreshAt = now + 9000;
+        task.readAt = now + 1200;
+    }
     function waitForRecord(reason) {
+        if (resource) { waitForResourceRecord(reason); return; }
         if (!task.awaiting) { task.awaiting = Date.now(); task.refreshes = 0; task.refreshAt = Date.now() + 3000; }
         if (task.refreshes >= 3 && Date.now() >= task.refreshAt) {
             env.halt('平台连续三次未确认完成，已暂停；请在原课件核对保存结果后重试'); return;
@@ -348,7 +501,7 @@
         try { env.set('icve-checkpoint-v2:' + courseKey, { id: task.page.id(), index: mediaNodes().indexOf(media), second: media.currentTime, updatedAt: task.savedAt }); } catch (e) { }
     }
     function documentTick() {
-        const preview = findVM('.FilePreview, .guide, .teach', vm => Array.isArray(vm.photoList) || vm.officePage);
+        const preview = findVM('.FilePreview, .guide, .teach', vm => Array.isArray(vm.photoList) && vm.photoList.length || vm.officePage);
         const content = findVM('.contentBox', vm => vm.officePage && vm.nrdata);
         const target = preview || content;
         if (target && Array.isArray(target.photoList) && target.photoList.length) {
@@ -361,6 +514,16 @@
                 status('文档浏览：' + (index + 1) + ' / ' + total); return;
             }
         }
+        if (resource && Number(resource.viewer?.pptOfficeTitle) > 0) {
+            const viewer = resource.viewer;
+            const index = Number(viewer.carouselIndex), total = Number(viewer.pptOfficeTitle);
+            if (index + 1 >= total) { waitForRecord('文档已到最后一页'); return; }
+            const next = Array.from(viewer.$el?.querySelectorAll('.FilePreview .page button') || [])
+                .find(el => visible(el) && !el.disabled && clean(el.textContent) === '下一页');
+            if (next && Date.now() >= task.docAt) { next.click(); task.docAt = Date.now() + 3000; }
+            status('文档浏览：' + (index + 1) + ' / ' + total + (next ? '' : '，请使用原生翻页控件'));
+            return;
+        }
         if (content && Number(content.officePage.total) > 0) {
             const page = Number(content.officePage.pageNum), total = Number(content.officePage.total);
             if (page >= total) { waitForRecord('文档已到最后一页'); return; }
@@ -368,6 +531,10 @@
                 .find(el => !el.disabled && el.getAttribute('aria-disabled') !== 'true' && (el.matches('.ivu-page-next') || /^(?:下一页|下页)$/.test(clean(el.textContent))));
             if (next && Date.now() >= task.docAt) { next.click(); task.docAt = Date.now() + 3000; }
             status('文档浏览：' + page + ' / ' + total + (next ? '' : '，请使用原生翻页控件')); return;
+        }
+        if (resource && (resource.viewer.loading || resource.viewer.curType === 'office' || resource.viewer.curType === 'word')) {
+            status('等待资源库文档预览加载');
+            return;
         }
         // Text/image viewers save their own native read records; the helper never infers completion from elapsed time.
         if (Date.now() - task.since > 6000) waitForRecord('正在读取文档／图文');
@@ -412,21 +579,43 @@
         sync(true); settleLoad(); loadDirectory();
         if (!study()) { if (env.running()) env.halt('当前不是课件学习页面'); return; }
         if (Date.now() < nextAt) return;
-        const current = pages.get(activeId), pending = rows.find(row => row.page.known && !row.page.complete);
+        if (resource) {
+            if (resource.archived) { env.halt('该资源库课程已归档，平台不记录新的学习进度'); return; }
+            if (!resource.key) { status('等待课程信息，请从资源库「我的课程」进入这门课'); return; }
+            if (resourceNavigation) {
+                if (Date.now() >= resourceNavigation.until) env.halt('资源库课件打开超时，请在课程目录检查该课件');
+                else status('正在打开资源库课件');
+                return;
+            }
+            if (activeId && !resource.viewer) { status('正在加载资源库课件'); return; }
+        }
+        const current = rows.find(row => row.page.id() === activeId)?.page;
+        const pending = rows.find(({ page }) => page.known && !page.complete && (!resource || !page.blocked && ['media', 'document'].includes(page.type)));
         if (seekPending) {
             seekPending = false;
-            if (pending && current !== pending.page) { select(pending.page); status('定位未完成任务：' + pending.page.title); return; }
+            if (pending && current !== pending.page) {
+                if (select(pending.page)) status('定位未完成任务：' + pending.page.title);
+                return;
+            }
         }
         if (!current || current.complete) {
             if (pending) { if (select(pending.page)) status('定位未完成任务：' + pending.page.title); return; }
-            if (partial || rows.some(row => !row.page.known)) { status('目录或完成记录尚未读全，请等待或点击「重试目录」'); return; }
+            if (partial || rows.some(row => !row.page.known)) { status('目录或完成记录尚未读全，请等待或点击「重试读取进度」'); return; }
+            if (resource && rows.some(row => !row.page.complete)) { env.halt('可自动学习的课件已处理，其余未完成项目需手动查看'); return; }
             if (rows.length) { env.halt('课程任务均已由平台确认为完成，已停止'); return; }
             status('请打开课程课件目录'); return;
         }
         if (!task || task.page !== current) {
             stop(); task = { page: current, since: Date.now(), docAt: Date.now() + 3000, media: null, refreshes: 0 };
         }
-        if (task.awaiting) { waitForRecord('当前资源已浏览'); return; }
+        if (task.awaiting) {
+            if (resource && task.readAt && Date.now() >= task.readAt && readResourceTree()) task.readAt = 0;
+            waitForRecord('当前资源已浏览'); return;
+        }
+        if (resource && (current.blocked || !['media', 'document'].includes(current.type))) {
+            env.halt('该资源库任务需要在原课件手动处理：' + current.title); return;
+        }
+        if (resource?.viewer?.tmShow) { env.halt('视频中有随堂题，请返回原课件处理后继续'); return; }
         if (Number(current.raw.nrlx) === 6 || /^(?:exam)$|考试/.test(clean(current.raw.fileType))) {
             env.halt('考试任务请手动进入；答题页可使用「查询答案」，不会自动开始或交卷'); return;
         }
@@ -443,10 +632,12 @@
         ownedMedia.add(media);
         try {
             media.muted = env.muted();
-            const maximumRate = /\/learnspace\/learn\//i.test(win.location.href) ? 2 : 16;
-            const rate = Math.min(maximumRate, Math.max(0.5, Number(env.rate()) || 1));
+            const levels = resource?.viewer?.speedLevels;
+            const requested = Math.min(/\/learnspace\/learn\//i.test(win.location.href) ? 2 : 16, Math.max(0.5, Number(env.rate()) || 1));
+            const rates = Array.isArray(levels) ? levels.map(level => Number(level.key)).filter(rate => Number.isFinite(rate) && rate > 0) : [];
+            const rate = rates.length ? Math.max(...rates.filter(rate => rate <= requested + .01), Math.min(...rates)) : requested;
             if (Math.abs(media.playbackRate - rate) > .01) media.playbackRate = rate;
-            if (task.restored !== media && media.readyState >= 1) {
+            if (!resource && task.restored !== media && media.readyState >= 1) {
                 task.restored = media;
                 // Native progress wins; a local checkpoint only resumes the same resource.
                 const saved = env.get('icve-checkpoint-v2:' + courseKey, null);
@@ -545,11 +736,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.20.0');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.20.1');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.20.0',
+        codeVersion: '4.20.1',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
@@ -580,7 +771,7 @@
     let $ = function (s, c) { return (unsafeWindow.jQuery || jquery)(s, c); };
     const jquery = jQuery.noConflict();
     const Icve = IS_ICVE ? createIcveStudy({
-        window: $w, document, jquery,
+        window: $w, document: $w.document, jquery,
         get: (key, fallback) => GM_getValue(key, fallback), set: (key, value) => GM_setValue(key, value),
         rate: () => _ulVideoRate(), muted: () => ConfigStore.get().sources.autoMute !== false, util: () => Util,
         running: () => !!youxueyuan.timer, paused: () => !!youxueyuan._manualPaused,
@@ -2225,12 +2416,19 @@
                 const action=button.dataset.ud,snapshot=this.state();
                 if(action==='original')this.open(false);
                 else if(action==='settings')openSettings();
-                else if(action==='start') { if(!document.querySelector('.ul-panel'))Init();if(!snapshot.current && snapshot.rows.length){const r=snapshot.rows.find(r=>!r.complete)||snapshot.rows[0];snapshot.vm.selectPage(r.page,r.section,r.chapter);}youxueyuan.start(false); }
+                else if(action==='start') {
+                    if(!document.querySelector('.ul-panel')) Init();
+                    if (!(typeof Icve !== 'undefined' && Icve) && !snapshot.current && snapshot.rows.length) {
+                        const row = snapshot.rows.find(r => !r.complete) || snapshot.rows[0];
+                        snapshot.vm.selectPage(row.page, row.section, row.chapter);
+                    }
+                    youxueyuan.start(false);
+                }
                 else if(action==='pause')youxueyuan.stop();
                 else if(action==='retry'){if(typeof Icve !== 'undefined' && Icve)Icve.loadDirectory(true);if(_ulCatalogState){_ulCatalogState.failures.forEach((n,s)=>_ulCatalogState.failures.set(s,0));_ulCatalogState.retryAt.clear();}}
                 else if(action==='more')this.limit+=80;
                 else if(action==='filter'){this.filter=button.dataset.filter;this.limit=80;}
-                else if(action==='view'){const r=snapshot.rows[Number(button.dataset.row)];if(r){snapshot.vm.selectPage(r.page,r.section,r.chapter);this.open(false);}}
+                else if(action==='view'){const r=snapshot.rows[Number(button.dataset.row)];if(r && snapshot.vm.selectPage(r.page,r.section,r.chapter)!==false)this.open(false);}
                 this.signature='';this.sync();
             });document.body.appendChild(this.root);this.signature='';
         },

@@ -2,7 +2,7 @@
 
 支持优学院（Ulearning）与智慧职教（ICVE）的 Tampermonkey 脚本，提供课程进度工作台、视频／音频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.20.0** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.20.1** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -59,7 +59,8 @@ v4.18.1 将安装名称统一为 Ulearn-Helper。如果仍显示旧名称，优�
 | --- | --- |
 | `ai.icve.com.cn` 新版智慧学习中心 | 学习目录、平台完成记录、学习工作台、未完成任务定位、连续播放、文档翻页，以及已适配题目的查询与填写 |
 | `mooc.icve.com.cn`、`icve-mooc.icve.com.cn` | 旧版 `learnspace` 页面及同源框架中的任务目录、完成标记、视频／音频与题目控件 |
-| `zjy2.icve.com.cn`、`zyk.icve.com.cn` | 识别旧版 Vue 目录、原生跳转入口、媒体／文档与题目控件；未提供可识别完成记录的项目显示为未读取 |
+| `zyk.icve.com.cn` 资源库 | 从课程首页读取任务点和平台完成记录，通过原生播放器播放视频或音频、浏览文档，等进度保存后续节 |
+| `zjy2.icve.com.cn` | 识别 Vue 目录、原生跳转入口、媒体／文档与题目控件；未提供可识别完成记录的项目显示为未读取 |
 
 在新版课程的课件目录页即可查看进度，无需逐个打开资源。脚本逐步读取延迟加载的章节，按平台完成记录跳过已完成项目；目录或记录未读全时，不会将课程判定为全部完成。课程列表页尚不提供跨课程批量运行。
 
@@ -156,6 +157,12 @@ AI 高级配置支持自定义鉴权方式、额外请求头、请求体模板�
 检查 Tampermonkey 中实际安装版本，确认只启用一份脚本，再刷新页面。GitHub 访问失败或扩展缓存可能延迟更新。
 
 反馈时请说明脚本版本、页面类型、操作步骤和错误提示。截图或诊断内容中的密钥、Token、个人信息应先隐藏。
+
+## v4.20.1 资源库课件修复
+
+在资源库「我的课程」进入课程首页，打开学习工作台即可读取任务点并开始。脚本会跳过平台已标记完成的任务点，自动打开可学习的未完成课件，进度经平台保存确认后继续。播放速度遵循原播放器提供的档位，随堂题提示出现时会暂停并提示处理。
+
+本次参考《智慧职教助手 7.0.2》的资源库模块，并核对资源库课程首页与课件页发布的前端组件。模拟测试覆盖首页进入、目录读取、视频保存重试、文档翻页和自动续节。
 
 ## v4.20.0 智慧职教适配
 
