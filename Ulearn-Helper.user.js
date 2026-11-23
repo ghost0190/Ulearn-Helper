@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.5
+// @version      4.21.6
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -825,8 +825,14 @@
                 sample: list.slice(0, 3).map(n => ({
                     id: n.id, name: String(n.name || '').slice(0, 30), fileType: n.fileType,
                     nodeLevel: n.level, last: n.last, children: childCount(n),
-                    resourceId: n.resourceId, typeId: n.typeId,
-                    parentId: n.parentId, examId: n.examId, fileUrl: String(n.fileUrl || '').slice(0, 60),
+                    resourceId: n.resourceId, typeId: n.typeId, examId: n.examId,
+                    isTaskPoint: n.isTaskPoint, allowDownload: n.allowDownload,
+                    courseDesignCellResourceVos: Array.isArray(n.courseDesignCellResourceVos) ? n.courseDesignCellResourceVos.length : n.courseDesignCellResourceVos,
+                    subtitleFileVOS: Array.isArray(n.subtitleFileVOS) ? n.subtitleFileVOS.length : n.subtitleFileVOS,
+                    parentId: n.parentId,
+                    fileUrl: String(n.fileUrl || ''),
+                    fileGenUrl: String(n.fileGenUrl || '').slice(0, 60),
+                    content: String(n.content || '').slice(0, 40),
                     hasRecord: !!n.studentStudyRecord, recordKeys: n.studentStudyRecord ? Object.keys(n.studentStudyRecord) : [],
                 })),
             });
@@ -860,6 +866,16 @@
             }
         }
         return out;
+    }
+
+    /** 叶子节点的类型：有元数据就按元数据细分，没有就按扩展名，再没有就默认文档 */
+    function leafKind(task) {
+        const k = kindOf(task);
+        if (k === 'media' || k === 'document' || k === 'exam' || k === 'manual') return k;
+        const url = String((task && (task.fileUrl || task.fileGenUrl)) || '');
+        if (/\.(mp4|m4a|mp3|flv|mov|avi|wmv|m3u8)([?#]|$)/i.test(url)) return 'media';
+        if (task && (task.examId != null || /作业|测验|考试|练习/.test(String(task.name || '')))) return 'exam';
+        return 'document';
     }
 
     /** 递归展开课程目录，返回扁平任务列表 [{id, name, fileType, parentId, level, ...}]
@@ -905,6 +921,11 @@
                     const n = await walk(id, level + 1);
                     if (n > 0) { task.childCount = n; task.kind = 'folder'; }
                     else if (task.kind === 'folder') task.kind = kindOf({ resourceId: task.resourceId, fileUrl: task.fileUrl, typeId: task.typeId });
+                }
+                // 叶子节点就是学习单元。资源库的 resourceId/fileUrl 常常都是空的，
+                // 靠元数据判断内容会把整门课判成 0 个可直提——层级结构才是唯一可靠依据。
+                if (task.kind === 'unknown' || task.kind === 'folder') {
+                    if (!task.childCount) task.kind = leafKind(task);
                 }
             }
             return added;
@@ -2097,11 +2118,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.5');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.6');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.5',
+        codeVersion: '4.21.6',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
