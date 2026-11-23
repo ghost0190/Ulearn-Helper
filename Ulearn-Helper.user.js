@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.2
+// @version      4.21.3
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -525,14 +525,28 @@
         if (n > 0) return n;
         return 100;
     }
+    /** 已知的 fileType 取值（逆向 + 平台实际目录），未知值不再默认当文档 */
+    const FILE_TYPE_MAP = {
+        '父节点': 'folder', '子节点': 'folder', '文件夹': 'folder',
+        'mp4': 'media', 'm4a': 'media', 'mp3': 'media', '视频': 'media', '音频': 'media',
+        'pptx': 'document', 'ppt': 'document', 'pdf': 'document', 'docx': 'document', 'doc': 'document',
+        'xlsx': 'document', 'xls': 'document', 'txt': 'document', '文档': 'document', '课件': 'document',
+        '作业': 'exam', '测验': 'exam', '考试': 'exam', '练习': 'exam', 'exam': 'exam',
+        '讨论': 'manual', 'discuss': 'manual',
+    };
     function kindOf(task) {
-        const t = String((task && (task.fileType || task.type || task.contentType)) || '').toLowerCase();
-        // 7.0.3 的 zyk 目录里用 "父节点"/"子节点" 表示可展开的文件夹
-        if (/^(父节点|文件夹|folder|directory)$/.test(t)) return 'folder';
+        const raw = String((task && (task.fileType || task.type || task.contentType)) || '').trim();
+        if (!raw) return 'unknown';
+        const hit = FILE_TYPE_MAP[raw];
+        if (hit) return hit;
+        const t = raw.toLowerCase();
+        if (FILE_TYPE_MAP[t]) return FILE_TYPE_MAP[t];
         if (/mp4|m4a|mp3|video|audio|视频|音频/.test(t)) return 'media';
         if (/exam|quiz|work|homework|作业|测验|考试|练习/.test(t)) return 'exam';
         if (/讨论|discuss/.test(t)) return 'manual';
-        return 'document';
+        if (/ppt|pdf|doc|xls|txt|文档|课件/.test(t)) return 'document';
+        // 认不出来就老实说不知道，别默认成文档去提交
+        return 'unknown';
     }
 
     async function studyOnce(target) {
@@ -551,14 +565,8 @@
             if (id == null) {
                 detail = await Adapters.zyk.detail(task.id);
                 trace('zyk.noRecordId', { sourceId: task.id, code: detail.code, msg: detail.msg, keys: detail.keys });
-                // 详情接口本身失败（课程参数不对 / 资源不属于该课程）才是真错误
-                if (!detail.ok) {
-                    return {
-                        ok: false, accepted: false, ms: Date.now() - t0, verified: false,
-                        reason: '资源详情接口返回 code=' + detail.code + (detail.msg ? '（' + detail.msg + '）' : '')
-                            + '，通常是 courseInfoId 与资源不匹配',
-                    };
-                }
+                // 详情接口 400「课件不存在」不代表不能提交：服务端按 sourceId 建记录，
+                // 详情接口读不到只说明这条路拿不到已有 record.id。先照常提交，让服务端给结论。
             }
             const payload = {
                 courseInfoId, id, parentId: task.parentId || 0, studyTime: total,
@@ -567,12 +575,23 @@
             };
             const r = await Adapters.zyk.submit(payload);
             const back = await Adapters.zyk.progress(courseInfoId, task.id);
-            const verified = !!back && Number(back.actualNum || 0) >= total;
+            // 回读依赖 courseContent/{id}；这个接口对本资源不可用（400）时，
+            // 不能把「读不到」当成「没写进去」——否则提交成功也会被判失败。
+            const canRead = !!back && back.actualNum != null;
+            const verified = canRead ? Number(back.actualNum) >= total : null;
             let reason = '';
-            if (!r.ok) reason = '接口拒绝：' + String((r.raw && (r.raw.text || (r.raw.json && r.raw.json.msg))) || '').slice(0, 80);
-            else if (!verified) reason = '接口返回成功但回读 actualNum=' + (back && back.actualNum) + ' < ' + total;
+            if (!r.ok) {
+                reason = '接口拒绝：' + String(r.text || '').slice(0, 100);
+                if (detail && !detail.ok) reason += '｜详情接口 code=' + detail.code + (detail.msg ? '（' + detail.msg + '）' : '');
+            } else if (verified === false) {
+                reason = '接口返回成功但回读 actualNum=' + back.actualNum + ' < ' + total;
+            } else if (verified === null) {
+                reason = '已提交，但该资源读不到回读记录，无法二次确认';
+            }
             return {
-                ok: r.ok && verified, accepted: r.ok, ms: Date.now() - t0, payload, echoed: back, verified,
+                // verified 为 null = 提交成功但无法回读确认，按成功处理并标注
+                ok: r.ok && verified !== false,
+                accepted: r.ok, ms: Date.now() - t0, payload, echoed: back, verified,
                 recordIdWasNull: id == null, reason,
             };
         }
@@ -740,6 +759,54 @@
         return [];
     }
 
+    /**
+     * 原始探测：把接口返回的节点原样给出（不做分类），并针对某个节点尝试多种候选 id，
+     * 看详情接口到底认哪一个。用来解决「目录能读但 courseContent/{id} 报课件不存在」。
+     */
+    async function probe(target) {
+        const out = { platform: state.platform, levels: [], candidates: [], detailTries: [] };
+        const walk = async (parentId, level, depth) => {
+            if (depth > 4) return;
+            const raw = await scanOnce(Object.assign({}, target, { parentId, level }));
+            const list = Array.isArray(raw) ? raw : [];
+            out.levels.push({
+                parentId: String(parentId), level, count: list.length,
+                fields: list.length ? Object.keys(list[0]) : [],
+                sample: list.slice(0, 3).map(n => ({
+                    id: n.id, name: String(n.name || '').slice(0, 30), fileType: n.fileType,
+                    parentId: n.parentId, examId: n.examId, fileUrl: String(n.fileUrl || '').slice(0, 60),
+                    hasRecord: !!n.studentStudyRecord, recordKeys: n.studentStudyRecord ? Object.keys(n.studentStudyRecord) : [],
+                    children: Array.isArray(n.children) ? n.children.length : n.children,
+                })),
+            });
+            for (const n of list) {
+                const k = String(n.fileType || '');
+                if (k === '父节点' || k === '子节点') await walk(n.id, k === '父节点' ? 1 : 2, depth + 1);
+            }
+        };
+        await walk(target.parentId || 0, target.level || 1, 0);
+
+        // 拿第一个非文件夹节点，逐个候选 id 打详情接口
+        const first = (function find() {
+            for (const lv of out.levels) for (const s of lv.sample) {
+                if (s.fileType !== '父节点' && s.fileType !== '子节点') return s;
+            }
+            return null;
+        })();
+        if (first) {
+            const candidates = [first.id];
+            // fileUrl 里可能藏着真正的 fileId
+            const m = String(first.fileUrl || '').match(/([a-f0-9]{20,}|\d{4,})/i);
+            if (m) candidates.push(m[1]);
+            out.candidates = candidates;
+            for (const cid of candidates) {
+                const d = await Adapters.zyk.detail(cid);
+                out.detailTries.push({ id: cid, ok: d.ok, code: d.code, msg: d.msg, keys: d.keys, hasRecord: !!d.record });
+            }
+        }
+        return out;
+    }
+
     /** 递归展开课程目录，返回扁平任务列表 [{id, name, fileType, parentId, level, ...}] */
     async function scanTree(target, options) {
         const o = options || {};
@@ -875,6 +942,7 @@
         scanExams,
         runPaper,
         resolveTarget,
+        probe,
         scanOnce,
         /** 扫当前平台在某课程下的所有任务（只读，不提交） */
         scan: scanOnce,
@@ -1037,7 +1105,7 @@
                     results.push(Object.assign({ id: t.id, name: t.name, kind: t.kind }, r));
                     this.state.done++;
                     this.say('[' + this.state.done + '/' + todo.length + '] ' + String(t.name).slice(0, 24) + '：'
-                        + (r.ok ? (r.verified ? '服务器已确认' : '已提交') : '失败 ' + (r.reason || '')));
+                        + (r.ok ? (r.verified === true ? '服务器已确认' : r.verified === null ? '已提交（无法回读确认）' : '已提交') : '失败 ' + (r.reason || '')));
                     this.sync();
                     if (this.delay()) await new Promise(res => setTimeout(res, this.delay()));
                 }
@@ -1045,13 +1113,15 @@
                     total: tasks.length,
                     alreadyDone: targets.length - pending.length,
                     submitted: results.filter(r => r.accepted).length,
-                    verified: results.filter(r => r.verified).length,
+                    verified: results.filter(r => r.verified === true).length,
+                    unconfirmed: results.filter(r => r.verified === null).length,
                     failed: results.filter(r => !r.ok).map(r => ({ id: r.id, name: r.name, reason: r.reason })),
                     at: Date.now(),
                 };
                 this.state.summary = summary;
                 this.state.lastRun = results;
                 const text = '完成：本次确认 ' + summary.verified + ' / 提交 ' + summary.submitted
+                    + (summary.unconfirmed ? '（其中 ' + summary.unconfirmed + ' 个无法回读确认）' : '')
                     + ' / 失败 ' + summary.failed.length + '（原有已完成 ' + summary.alreadyDone + '）';
                 this.say(text);
                 this.toast(text);
@@ -1150,7 +1220,32 @@
                     add(!!info, info ? '资源详情可读，studentStudyRecord=' + (info.studentStudyRecord ? '有' : '无（首次学习）') : '资源详情为空');
                 } catch (e) { add(false, '资源详情异常：' + (e && e.message || e)); }
             }
+
+            // ⑤ 原始探测：不依赖分类，直接看平台返回的真实字段，并试出详情接口认哪个 id
+            try {
+                this.say('正在做原始探测（会尝试多种候选 id）…');
+                const p = await this.api.probe(ctx);
+                for (const lv of p.levels || []) {
+                    add(lv.count > 0, '目录层 parentId=' + lv.parentId + ' level=' + lv.level + ' 共 ' + lv.count + ' 项'
+                        + (lv.fields.length ? '，字段：' + lv.fields.join(',') : ''));
+                    for (const s of lv.sample) {
+                        add(true, '  · id=' + s.id + ' fileType=' + s.fileType + ' name=' + s.name
+                            + (s.hasRecord ? ' [已有记录 ' + s.recordKeys.join('/') + ']' : ' [无记录]')
+                            + (s.fileUrl ? ' fileUrl=' + s.fileUrl : ''));
+                    }
+                }
+                for (const t of p.detailTries || []) {
+                    add(t.ok, '详情接口 id=' + t.id + ' → code=' + t.code + (t.msg ? '（' + t.msg + '）' : '')
+                        + (t.keys.length ? '，字段：' + t.keys.join(',') : ''));
+                }
+                if (!(p.detailTries || []).some(t => t.ok) && (p.detailTries || []).length) {
+                    add(false, '所有候选 id 都被详情接口拒绝 → 提交会失败');
+                }
+                console.log('[Ulearn-Helper][icve][diag] 原始探测', JSON.stringify(p, null, 1));
+            } catch (e) { add(false, '原始探测异常：' + (e && e.message || e)); }
+
             this.say(lines.join('\n'));
+            console.log('[Ulearn-Helper][icve][diag] 请求轨迹', this.api.state.log);
             return lines;
         },
 
@@ -1925,11 +2020,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.2');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.3');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.2',
+        codeVersion: '4.21.3',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
