@@ -2,7 +2,7 @@
 
 支持优学院（Ulearning）与智慧职教（ICVE）的 Tampermonkey 脚本，提供课程进度工作台、视频／音频与章节练习辅助、作业／考试查题，以及可配置的 AI 答题与控件填写。
 
-当前脚本：**v4.20.1** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
+当前脚本：**v4.21.0** · [安装脚本](https://raw.githubusercontent.com/ghost0190/Ulearn-Helper/main/Ulearn-Helper.user.js) · [备用安装线路](https://cdn.jsdelivr.net/gh/ghost0190/Ulearn-Helper@main/Ulearn-Helper.user.js) · [反馈问题](https://github.com/ghost0190/Ulearn-Helper/issues)
 
 ## 安装与更新
 
@@ -68,9 +68,24 @@ v4.18.1 将安装名称统一为 Ulearn-Helper。如果仍显示旧名称，优�
 
 媒体默认 2 倍速，静音开关与优学院共用；旧版 MOOC 的实际倍速最多为 2。可以恢复同一资源的本地播放位置，平台禁止拖动时优先遵守其播放器设置。可识别的 Office／PPT 文档使用原生翻页控件，最后一页不会循环回到第一页。
 
-**智慧职教通过原播放器／文档组件保存学习记录。** 资源浏览结束后，脚本通过原生目录入口刷新完成记录，最多核对三次，仍未确认则暂停。优学院的直接完成提交协议仅用于优学院。未知、受限、讨论类任务会提示手动处理；练习只有全部填写通过核对，且存在已适配的原生练习提交按钮时才自动提交。考试须手动进入，脚本不会自动开始考试或交卷。
+**智慧职教通过原播放器／文档组件保存学习记录。** 资源浏览结束后，脚本通过原生目录入口刷新完成记录，最多核对三次，仍未确认则暂停。未知、受限、讨论类任务会提示手动处理；练习只有全部填写通过核对，且存在已适配的原生练习提交按钮时才自动提交。考试须手动进入，脚本不会自动开始考试或交卷。
 
 无法读取的跨域播放器、画布题或新增页面结构需要单独适配。新版与旧版已通过本地模拟课程和隔离 Edge 检查；尚未在登录后的真实智慧职教课程中验证。
+
+### 智慧职教协议直提
+
+除页面控件路径外，脚本另有一条**协议路径**：直接调用平台的学习记录接口提交进度，不依赖播放器或翻页控件。两条路径并存，可在设置里分别关闭。
+
+| 平台 | 学习记录接口 | 请求体编码 |
+| --- | --- | --- |
+| 资源库 `zyk` | `PUT /prod-api/teacher/studyRecord` | AES-128-ECB + base64 |
+| 职教云 `zjy2` | `POST /prod-api/spoc/studyRecord/update` | AES-128-ECB，密钥由 token 派生 |
+| AI优课 `ai` | `POST /prod-api/course/studyRecord` | 明文 JSON |
+
+设置 → 来源页底部提供：启用协议直提／协议答题、ICVE Token（可留空，自动从页面登录态兑换）、任务间隔、**只读扫描目录**（只列任务与完成状态，不提交）、开始直提与停止。
+
+**每个任务提交后都会回读校验**：服务器没有生效即判失败并给出原因，不会把接口返回的成功当成已完成。目录中的文件夹、讨论、考试节点不会作为学习任务提交。协议答题的答案仍按来源顺序获取（本地题库 → 远程库 → 后端 → AI），交卷覆盖资源库与 AI优课，职教云本版只做学习进度。智慧职教不提供带正确答案的试卷接口，因此答题不依赖平台答案。
+
 
 ### AI 答题与操作兜底
 

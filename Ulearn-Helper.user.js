@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.20.1
+// @version      4.21.0
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -47,6 +47,965 @@
 (function () {
     "use strict";
     const IS_ICVE = /^(?:ai|mooc|icve-mooc|zjy2|zyk)\.icve\.com\.cn$/.test(location.hostname);
+
+    // BEGIN ICVE API
+    function createIcveApi(env) {
+    const win = env.window, doc = env.document;
+    const fetchFn = (...a) => (env.fetch || win.fetch).apply(win, a);
+
+    /* ------------------------------------------------------------------ *
+     * 1. 纯 JS 加密层
+     *    zyk  : AES-128-ECB + PKCS7 + base64，key = "djekiytolkijduey"
+     *    zjy2 : 同上，key = md5(token).hexdigest()[:16]
+     *    ai   : 无加密，直接 JSON
+     * ------------------------------------------------------------------ */
+    const SBOX = new Uint8Array([
+        0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+        0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+        0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+        0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+        0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+        0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+        0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+        0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+        0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+        0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+        0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+        0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+        0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+        0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+        0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+        0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
+    ]);
+    const RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+    const _rkCache = Object.create(null);
+    function xtime(b) { return ((b << 1) ^ (b & 0x80 ? 0x1b : 0)) & 0xff; }
+    function keySchedule(key) {
+        const tag = Array.prototype.join.call(key, ',');
+        if (_rkCache[tag]) return _rkCache[tag];
+        const w = new Uint8Array(176);
+        w.set(key, 0);
+        for (let i = 16, r = 0; i < 176; i += 4) {
+            let t = [w[i - 4], w[i - 3], w[i - 2], w[i - 1]];
+            if (i % 16 === 0) {
+                t = [SBOX[t[1]] ^ RCON[r++], SBOX[t[2]], SBOX[t[3]], SBOX[t[0]]];
+            }
+            for (let j = 0; j < 4; j++) w[i + j] = w[i - 16 + j] ^ t[j];
+        }
+        _rkCache[tag] = w;
+        return w;
+    }
+    function aesEncryptBlock(block, rk) {
+        const s = Uint8Array.from(block);
+        for (let i = 0; i < 16; i++) s[i] ^= rk[i];
+        for (let round = 1; round <= 10; round++) {
+            for (let i = 0; i < 16; i++) s[i] = SBOX[s[i]];
+            // ShiftRows（列主序）
+            const t = Uint8Array.from(s);
+            for (let c = 0; c < 4; c++) for (let r = 1; r < 4; r++) s[c * 4 + r] = t[((c + r) % 4) * 4 + r];
+            if (round !== 10) {
+                for (let c = 0; c < 4; c++) {
+                    const a0 = s[c * 4], a1 = s[c * 4 + 1], a2 = s[c * 4 + 2], a3 = s[c * 4 + 3];
+                    s[c * 4] = xtime(a0) ^ (xtime(a1) ^ a1) ^ a2 ^ a3;
+                    s[c * 4 + 1] = a0 ^ xtime(a1) ^ (xtime(a2) ^ a2) ^ a3;
+                    s[c * 4 + 2] = a0 ^ a1 ^ xtime(a2) ^ (xtime(a3) ^ a3);
+                    s[c * 4 + 3] = (xtime(a0) ^ a0) ^ a1 ^ a2 ^ xtime(a3);
+                }
+            }
+            for (let i = 0; i < 16; i++) s[i] ^= rk[round * 16 + i];
+        }
+        return s;
+    }
+    function utf8Bytes(str) {
+        const out = [];
+        for (let i = 0; i < str.length; i++) {
+            let c = str.charCodeAt(i);
+            if (c < 0x80) out.push(c);
+            else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+            else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+                const c2 = str.charCodeAt(++i);
+                const cp = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00);
+                out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+            } else out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+        }
+        return Uint8Array.from(out);
+    }
+    const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    function b64encode(bytes) {
+        let out = '';
+        for (let i = 0; i < bytes.length; i += 3) {
+            const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
+            out += B64[a >> 2] + B64[((a & 3) << 4) | ((b || 0) >> 4)]
+                + (i + 1 < bytes.length ? B64[((b & 15) << 2) | ((c || 0) >> 6)] : '=')
+                + (i + 2 < bytes.length ? B64[c & 63] : '=');
+        }
+        return out;
+    }
+    function pkcs7(data) {
+        const n = 16 - (data.length % 16);
+        const out = new Uint8Array(data.length + n);
+        out.set(data, 0);
+        out.fill(n, data.length);
+        return out;
+    }
+    /** AES-128-ECB/PKCS7 → base64，等价 CryptoJS.AES.encrypt(str, key, {mode:ECB}) */
+    function aesEncrypt(text, key) {
+        const keyBytes = typeof key === 'string' ? utf8Bytes(key) : key;
+        if (keyBytes.length !== 16) throw new Error('AES 密钥必须是 16 字节，当前 ' + keyBytes.length);
+        const rk = keySchedule(keyBytes);
+        const data = pkcs7(utf8Bytes(String(text)));
+        const out = new Uint8Array(data.length);
+        for (let i = 0; i < data.length; i += 16) out.set(aesEncryptBlock(data.subarray(i, i + 16), rk), i);
+        return b64encode(out);
+    }
+    // MD5（zjy2 用它从 token 派生 AES key：md5(token).hexdigest()[:16]）
+    function md5(text) {
+        const bytes = utf8Bytes(String(text));
+        const len = bytes.length;
+        const withPad = new Uint8Array((((len + 8) >> 6) + 1) << 6);
+        withPad.set(bytes, 0);
+        withPad[len] = 0x80;
+        const bitLen = len * 8;
+        for (let i = 0; i < 4; i++) withPad[withPad.length - 8 + i] = (bitLen >>> (8 * i)) & 0xff;
+        for (let i = 0; i < 4; i++) withPad[withPad.length - 4 + i] = Math.floor(bitLen / 0x100000000) >>> (8 * i) & 0xff;
+        let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+        const S = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+            5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+            4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+            6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+        const K = new Uint32Array(64);
+        for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0;
+        const M = new Uint32Array(16);
+        for (let off = 0; off < withPad.length; off += 64) {
+            for (let i = 0; i < 16; i++) {
+                M[i] = withPad[off + i * 4] | (withPad[off + i * 4 + 1] << 8)
+                    | (withPad[off + i * 4 + 2] << 16) | (withPad[off + i * 4 + 3] << 24);
+            }
+            let A = a0, B = b0, C = c0, D = d0;
+            for (let i = 0; i < 64; i++) {
+                let F, g;
+                if (i < 16) { F = (B & C) | (~B & D); g = i; }
+                else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+                else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) % 16; }
+                else { F = C ^ (B | ~D); g = (7 * i) % 16; }
+                F = (F + A + K[i] + M[g]) >>> 0;
+                A = D; D = C; C = B;
+                B = (B + (((F << S[i]) | (F >>> (32 - S[i]))) >>> 0)) >>> 0;
+            }
+            a0 = (a0 + A) >>> 0; b0 = (b0 + B) >>> 0; c0 = (c0 + C) >>> 0; d0 = (d0 + D) >>> 0;
+        }
+        const hex = n => {
+            let s = '';
+            for (let i = 0; i < 4; i++) s += ((n >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+            return s;
+        };
+        return hex(a0) + hex(b0) + hex(c0) + hex(d0);
+    }
+
+    const ZYK_KEY = 'djekiytolkijduey';
+    const zjy2Key = token => md5(token).slice(0, 16);
+
+    /* ------------------------------------------------------------------ *
+     * 2. 平台常量（域名与路径全部来自 7.0.3 字节码）
+     * ------------------------------------------------------------------ */
+    const HOSTS = {
+        zyk: 'https://zyk.icve.com.cn',
+        zjy2: 'https://zjy2.icve.com.cn',
+        ai: 'https://ai.icve.com.cn',
+        mooc: 'https://mooc.icve.com.cn',
+    };
+    const PLATFORM = (() => {
+        if (env.platform) return String(env.platform);
+        const h = String((win.location && win.location.hostname) || env.hostname || '');
+        if (h.indexOf('zyk.') === 0) return 'zyk';
+        if (h.indexOf('zjy2.') === 0) return 'zjy2';
+        if (h.indexOf('ai.') === 0) return 'ai';
+        if (h.indexOf('mooc.') === 0 || h.indexOf('icve-mooc.') === 0) return 'mooc';
+        return '';
+    })();
+
+    /* ------------------------------------------------------------------ *
+     * 3. 请求与鉴权
+     * ------------------------------------------------------------------ */
+    const state = { token: '', bearer: '', platform: PLATFORM, log: [] };
+    const say = text => { try { env.say(text); } catch (e) { } };
+    const trace = (kind, detail) => { state.log.push({ t: Date.now(), kind, detail }); if (state.log.length > 200) state.log.shift(); };
+
+    function readStoredToken() {
+        const keys = ['access_token', 'token', 'Authorization', 'authorization', 'user_token', 'icve_token'];
+        const out = [];
+        try {
+            for (const key of keys) {
+                const v = win.localStorage.getItem(key);
+                if (v) out.push({ from: 'localStorage:' + key, value: v });
+            }
+            const raw = win.localStorage.getItem('userInfo') || win.localStorage.getItem('user');
+            if (raw) {
+                try {
+                    const obj = JSON.parse(raw);
+                    for (const key of keys) if (obj && typeof obj[key] === 'string') out.push({ from: 'json:' + key, value: obj[key] });
+                } catch (e) { }
+            }
+        } catch (e) { }
+        const cookie = String(doc.cookie || '');
+        for (const key of keys) {
+            const m = cookie.match(new RegExp('(?:^|;\\s*)' + key + '=([^;]+)'));
+            if (m) out.push({ from: 'cookie:' + key, value: decodeURIComponent(m[1]) });
+        }
+        return out;
+    }
+    function explicitToken() {
+        try {
+            const cfg = env.config && env.config();
+            const v = cfg && (cfg.icveToken || cfg.token);
+            return typeof v === 'string' && v.trim() ? v.trim() : '';
+        } catch (e) { return ''; }
+    }
+    function authHeaders() {
+        const h = { 'Content-Type': 'application/json;charset=UTF-8' };
+        if (state.bearer) h.Authorization = 'Bearer ' + state.bearer;
+        if (state.platform === 'zyk') { h.Origin = HOSTS.zyk; h.Host = 'zyk.icve.com.cn'; }
+        if (state.platform === 'zjy2') { h.Origin = HOSTS.zyk; h.Host = 'zjy2.icve.com.cn'; }
+        return h;
+    }
+    async function call(url, options) {
+        const opt = Object.assign({ credentials: 'include', headers: authHeaders() }, options || {});
+        trace('request', { url, method: opt.method || 'GET' });
+        const res = await fetchFn(url, opt);
+        const text = await res.text();
+        let json = null;
+        try { json = text ? JSON.parse(text) : null; } catch (e) { }
+        trace('response', { url, status: res.status, code: json && json.code, msg: json && json.msg });
+        return { status: res.status, ok: res.ok, text, json };
+    }
+    /**
+     * token → access_token（等价 src/lib/*.py::set_user_auth_token）
+     * 页面里优先用账号自带的 Bearer；拿不到才走 passLogin 兑换。
+     */
+    async function ensureAuth() {
+        if (state.bearer) return true;
+        const candidates = readStoredToken();
+        const explicit = explicitToken();
+        if (explicit) candidates.unshift({ from: 'config', value: explicit });
+        if (!candidates.length) { say('未在页面存储中找到 token，请在设置里填写 ICVE Token'); return false; }
+        for (const item of candidates) {
+            const value = String(item.value || '').replace(/^Bearer\s+/i, '').trim();
+            if (!value) continue;
+            // 值本身像 access_token（平台签发的 JWT/长串）就直接用，避免多余兑换
+            if (/^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+$/.test(value) || value.length > 40) {
+                state.token = value; state.bearer = value;
+                trace('auth.direct', item.from);
+                return true;
+            }
+            const r = await call(HOSTS[state.platform] + '/prod-api/auth/passLogin?token=' + encodeURIComponent(value));
+            if (r.json && r.json.code === 200 && r.json.data && r.json.data.access_token) {
+                state.token = value;
+                state.bearer = r.json.data.access_token;
+                trace('auth.passLogin', item.from);
+                return true;
+            }
+        }
+        say('token 兑换 access_token 失败');
+        return false;
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 4. 三家平台的课程 / 任务 / 进度协议
+     * ------------------------------------------------------------------ */
+    const Adapters = {
+        // 资源库：PUT /prod-api/teacher/studyRecord，body = base64(AES(json, "djekiytolkijduey"))
+        zyk: {
+            async courses(flag) {
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/courseList/myCourseList?pageNum=1&pageSize=600&flag=' + (flag || 1));
+                return (r.json && r.json.code === 200 && r.json.rows) || [];
+            },
+            async modules(courseInfoId) {
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/courseContent/studyMoudleList?courseInfoId=' + encodeURIComponent(courseInfoId));
+                return (r.json && r.json.code === 200 && r.json.data) || [];
+            },
+            async tasks(courseInfoId, parentId, level) {
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/courseContent/studyList?level=' + (level || 1)
+                    + '&parentId=' + encodeURIComponent(parentId || 0) + '&courseInfoId=' + encodeURIComponent(courseInfoId));
+                return Array.isArray(r.json) ? r.json : ((r.json && r.json.data) || []);
+            },
+            async recordId(sourceId) {
+                // 先打点计数（平台要求），再读 studentStudyRecord.id
+                await call(HOSTS.zyk + '/prod-api/teacher/courseDesign/viewCount/' + encodeURIComponent(sourceId), { method: 'POST' });
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/courseContent/' + encodeURIComponent(sourceId));
+                const rec = r.json && r.json.data && r.json.data.studentStudyRecord;
+                return rec ? rec.id : null;
+            },
+            async progress(courseInfoId, sourceId) {
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/courseContent/' + encodeURIComponent(sourceId));
+                const rec = r.json && r.json.data && r.json.data.studentStudyRecord;
+                return rec || null;
+            },
+            async submit(payload) {
+                const body = aesEncrypt(JSON.stringify(payload), ZYK_KEY);
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/studyRecord', {
+                    method: 'PUT', body, headers: Object.assign(authHeaders(), { 'Content-Type': 'application/json' }),
+                });
+                return { ok: r.text.indexOf('操作成功') >= 0 || (r.json && r.json.code === 200), raw: r };
+            },
+            async paper(examId) {
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/exam/paper?id=' + encodeURIComponent(examId));
+                return r.json && r.json.data;
+            },
+            async submitAnswer(payload) {
+                const body = aesEncrypt(JSON.stringify(payload), ZYK_KEY);
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/exam/record', {
+                    method: 'POST', body, headers: Object.assign(authHeaders(), {
+                        Accept: 'application/json, text/plain, */*', 'Content-Type': 'text/plain',
+                    }),
+                });
+                return { ok: r.status === 200, raw: r };
+            },
+        },
+        // 职教云 / MOOC+：POST /prod-api/spoc/studyRecord/update，param=quote_plus(base64(AES(json, md5(token)[:16])))
+        zjy2: {
+            async courses() {
+                const r = await call(HOSTS.zjy2 + '/prod-api/spoc/courseInfoStudent/myCourseList?pageNum=1&pageSize=1000');
+                return (r.json && r.json.code === 200 && r.json.rows) || [];
+            },
+            async modules(courseId, courseInfoId, classId) {
+                const r = await call(HOSTS.zjy2 + '/prod-api/spoc/courseDesign/study/record?courseId=' + encodeURIComponent(courseId)
+                    + '&courseInfoId=' + encodeURIComponent(courseInfoId) + '&parentId=0&level=1&classId=' + encodeURIComponent(classId));
+                return (r.json && r.json.code === 200 && r.json.data) || [];
+            },
+            async tasks(courseId, courseInfoId, classId, parentId, level) {
+                const r = await call(HOSTS.zjy2 + '/prod-api/spoc/courseDesign/study/record?courseId=' + encodeURIComponent(courseId)
+                    + '&courseInfoId=' + encodeURIComponent(courseInfoId) + '&parentId=' + encodeURIComponent(parentId || 0)
+                    + '&level=' + (level || 1) + '&classId=' + encodeURIComponent(classId));
+                return (r.json && r.json.code === 200 && r.json.data) || [];
+            },
+            async info(id) {
+                const r = await call(HOSTS.zjy2 + '/prod-api/spoc/courseDesign/getStudyCellInfo?id=' + encodeURIComponent(id));
+                return r.json && r.json.data;
+            },
+            async submit(payload) {
+                const key = zjy2Key(state.token || state.bearer);
+                const param = encodeURIComponent(aesEncrypt(JSON.stringify(payload), key));
+                const r = await call(HOSTS.zjy2 + '/prod-api/spoc/studyRecord/update', {
+                    method: 'POST', body: JSON.stringify({ param }),
+                    headers: Object.assign(authHeaders(), { 'Content-Type': 'application/json' }),
+                });
+                return { ok: r.status === 200 && (!r.json || r.json.code === 200), raw: r };
+            },
+        },
+        // AI 优课：POST /prod-api/course/studyRecord，明文 JSON（逆向所得四个 999）
+        ai: {
+            async courses(queryType) {
+                const r = await call(HOSTS.ai + '/prod-api/course/courseInfo/myCourse?queryType=' + (queryType || 1)
+                    + '&queryStatus=1&total=0&pageSize=1000&pageNum=1');
+                return (r.json && r.json.code === 200 && r.json.rows) || [];
+            },
+            async design(courseInfoId, courseId) {
+                const r = await call(HOSTS.ai + '/prod-api/course/courseDesign/getStudentDesignList?courseInfoId='
+                    + encodeURIComponent(courseInfoId) + '&courseId=' + encodeURIComponent(courseId));
+                return (r.json && r.json.code === 200 && r.json.data) || [];
+            },
+            async cells(courseInfoId, parentId) {
+                const r = await call(HOSTS.ai + '/prod-api/course/courseDesign/getCellList?courseInfoId='
+                    + encodeURIComponent(courseInfoId) + '&parentId=' + encodeURIComponent(parentId || ''));
+                return (r.json && r.json.code === 200 && r.json.data) || [];
+            },
+            async submit(payload) {
+                const r = await call(HOSTS.ai + '/prod-api/course/studyRecord', {
+                    method: 'POST', body: JSON.stringify(payload),
+                    headers: Object.assign(authHeaders(), { 'Content-Type': 'application/json;charset=UTF-8' }),
+                });
+                return { ok: r.status === 200 && r.json && r.json.code === 200, raw: r };
+            },
+            async paper(id, groupId) {
+                const r = await call(HOSTS.ai + '/prod-api/course/exam/paper?id=' + encodeURIComponent(id)
+                    + (groupId ? '&groupId=' + encodeURIComponent(groupId) : ''));
+                return r.json && r.json.data;
+            },
+            async submitExam(payload) {
+                const body = b64encode(utf8Bytes(encodeURIComponent(JSON.stringify(payload))));
+                const r = await call(HOSTS.ai + '/prod-api/course/exam/record', {
+                    method: 'POST', body,
+                    headers: Object.assign(authHeaders(), { 'Content-Type': 'application/json;charset=UTF-8' }),
+                });
+                return { ok: r.status === 200 && r.json && r.json.code === 200, raw: r };
+            },
+        },
+    };
+
+    /* ------------------------------------------------------------------ *
+     * 5. 统一的“把任务做到 100%”实现
+     *    - 时长来源与 7.0.3 一致：视频随机 100-1000、PPT 取分页数、兜底 100
+     *    - 三个进度字段同值写满（平台只校验字段与 token，不收播放证据）
+     * ------------------------------------------------------------------ */
+    function durationOf(task, kind) {
+        // AI优课：7.0.3 的 src/ui/ai_icve_ui.py 直接把 999 当 actualNum/lastNum/totalNum/studyDuration
+        if (state.platform === 'ai') return 999;
+        const n = Number(task && (task.totalNum || task.videoTime || task.time || 0));
+        if (kind === 'media' && !(n > 0)) return 100 + Math.floor(Math.random() * 900);
+        if (n > 0) return n;
+        return 100;
+    }
+    function kindOf(task) {
+        const t = String((task && (task.fileType || task.type || task.contentType)) || '').toLowerCase();
+        // 7.0.3 的 zyk 目录里用 "父节点"/"子节点" 表示可展开的文件夹
+        if (/^(父节点|文件夹|folder|directory)$/.test(t)) return 'folder';
+        if (/mp4|m4a|mp3|video|audio|视频|音频/.test(t)) return 'media';
+        if (/exam|quiz|work|homework|作业|测验|考试|练习/.test(t)) return 'exam';
+        if (/讨论|discuss/.test(t)) return 'manual';
+        return 'document';
+    }
+
+    async function studyOnce(target) {
+        const p = state.platform, t0 = Date.now();
+        if (p === 'zyk') {
+            const { courseInfoId, task } = target;
+            const total = durationOf(task, kindOf(task));
+            const id = task.studentStudyRecord && task.studentStudyRecord.id || await Adapters.zyk.recordId(task.id);
+            if (!id) return { ok: false, reason: '拿不到 studyRecord.id' };
+            const payload = {
+                courseInfoId, id, parentId: task.parentId || 0, studyTime: total,
+                sourceId: task.id, studentId: target.studentId,
+                actualNum: total, lastNum: total, totalNum: total,
+            };
+            const r = await Adapters.zyk.submit(payload);
+            const back = await Adapters.zyk.progress(courseInfoId, task.id);
+            const verified = !!back && Number(back.actualNum || 0) >= total;
+            return {
+                ok: r.ok && verified, accepted: r.ok, ms: Date.now() - t0, payload, echoed: back, verified,
+                reason: r.ok && !verified ? '接口返回成功但回读 actualNum=' + (back && back.actualNum) + ' < ' + total : (r.ok ? '' : '接口拒绝'),
+            };
+        }
+        if (p === 'zjy2') {
+            const { courseInfoId, classId, task } = target;
+            const info = await Adapters.zjy2.info(task.id);
+            const rec = info && info.studentStudyRecord;
+            const total = Number(rec && rec.totalNum) > 0 ? Number(rec.totalNum) : durationOf(task, kindOf(task));
+            const payload = {
+                courseInfoId, classId, studyTime: total, sourceId: task.id,
+                totalNum: total, actualNum: total, lastNum: total,
+            };
+            const r = await Adapters.zjy2.submit(payload);
+            const back = await Adapters.zjy2.info(task.id);
+            const echoed = back && back.studentStudyRecord;
+            const verified = !!echoed && Number(echoed.actualNum || 0) >= total;
+            return {
+                ok: r.ok && verified, accepted: r.ok, ms: Date.now() - t0, payload, echoed, verified,
+                reason: r.ok && !verified ? '接口返回成功但回读 actualNum=' + (echoed && echoed.actualNum) + ' < ' + total : (r.ok ? '' : '接口拒绝'),
+            };
+        }
+        if (p === 'ai') {
+            const { courseId, courseInfoId, task, parentId } = target;
+            const total = durationOf(task, kindOf(task));
+            const payload = {
+                courseId, courseInfoId, sourceId: task.id, parentId: parentId || 0,
+                actualNum: total, lastNum: total, totalNum: total, studyDuration: total,
+            };
+            const r = await Adapters.ai.submit(payload);
+            // AI 优课没有单任务的读回接口，以接口 code 为准，并在结果里标注 verified=false
+            return {
+                ok: r.ok, accepted: r.ok, ms: Date.now() - t0, payload, verified: false,
+                reason: r.ok ? '' : '接口拒绝（code=' + (r.raw.json && r.raw.json.code) + '）',
+            };
+        }
+        return { ok: false, reason: '当前域名不是 ICVE 平台' };
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 6. 答题：题目 → 答案（本地题库/AI）→ 平台要求的编码 → 提交
+     * ------------------------------------------------------------------ */
+    function normalizeTypeName(typeId) {
+        const map = { '1': '单选题', '2': '多选题', '3': '填空题', '4': '判断题', '5': '简答题' };
+        return map[String(typeId)] || '单选题';
+    }
+    /** 平台 dataJson → 选项文本数组（A.xxx → xxx） */
+    function optionsOf(dataJson) {
+        try {
+            const arr = typeof dataJson === 'string' ? JSON.parse(dataJson) : dataJson;
+            return (Array.isArray(arr) ? arr : []).map((it, i) => {
+                const raw = String(it && (it.Content != null ? it.Content : it.content != null ? it.content : it.name) || '');
+                const text = raw.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+                return { key: String.fromCharCode(65 + i), text, raw, id: it && (it.id != null ? it.id : it.key) };
+            });
+        } catch (e) { return []; }
+    }
+    /** 答案文本 → 平台 answerList
+     *  zyk / ai 的选择题要字母（A/B/C），答题记录里 answerList 就是 ["A"] / ["A","C"]
+     *  判断题：A=对 B=错；填空/简答：逐空文本
+     *  传入 options 时优先按选项原文匹配，避免"北京/北京大学"这类包含关系误判
+     */
+    function toAnswerList(answer, kind, multiple, options) {
+        const s = String(answer == null ? '' : answer).trim();
+        if (!s) return [];
+        if (kind === 'judge') {
+            if (/^(true|1|a|对|正确|是|√|✓|y|yes)$/i.test(s)) return ['A'];
+            if (/^(false|0|b|错|错误|否|×|✕|n|no)$/i.test(s)) return ['B'];
+            const idx = (options || []).findIndex(o => o.text && s.indexOf(o.text) >= 0);
+            return idx >= 0 ? [String.fromCharCode(65 + idx)] : [];
+        }
+        if (kind === 'blank' || kind === 'essay') {
+            return (s.indexOf('||') >= 0 ? s.split('||') : [s]).map(x => String(x).trim()).filter(Boolean);
+        }
+        const parts = s.indexOf('||') >= 0 ? s.split('||') : s.split(/[,，\s]+/);
+        const picked = [];
+        const list = options || [];
+        for (const part of parts) {
+            const p = String(part).trim();
+            if (!p) continue;
+            // 1) 选项原文精确匹配
+            const exact = list.findIndex(o => o.text === p);
+            if (exact >= 0) { const k = String.fromCharCode(65 + exact); if (!picked.includes(k)) picked.push(k); continue; }
+            // 2) 纯字母
+            if (/^[A-Z]$/i.test(p)) {
+                const k = p.toUpperCase();
+                const i = k.charCodeAt(0) - 65;
+                if (i < list.length && !picked.includes(k)) picked.push(k);
+                continue;
+            }
+            // 3) 包含匹配，但只在唯一命中时采用
+            const loose = list.map((o, i) => ({ o, i })).filter(({ o }) => o.text && (o.text === p || o.text.indexOf(p) >= 0 || p.indexOf(o.text) >= 0));
+            if (loose.length === 1) {
+                const k = String.fromCharCode(65 + loose[0].i);
+                if (!picked.includes(k)) picked.push(k);
+            }
+        }
+        return multiple ? picked : picked.slice(0, 1);
+    }
+    async function answerQuestions(paper, opts) {
+        const out = [];
+        const questions = (paper && (paper.questions || paper.questionList)) || [];
+        for (let i = 0; i < questions.length; i++) {
+            const q = questions[i];
+            const opts4 = optionsOf(q.dataJson);
+            const kind = kindOfType(String(q.typeId || q.type || ''));
+            const multiple = kind === 'choice' && (String(q.typeId) === '2' || /多选/.test(String(q.typeName || '')));
+            let answer = '';
+            let source = '';
+            if (opts.ask) {
+                const r = await opts.ask({
+                    title: String(q.title || '').replace(/<[^>]+>/g, ' ').trim(),
+                    options: opts4.map(o => o.text),
+                    typeName: normalizeTypeName(q.typeId),
+                    kind, multiple,
+                });
+                if (r && r.answer) { answer = r.answer; source = r.source || 'ask'; }
+            }
+            const list = toAnswerList(answer, kind, multiple, opts4);
+            out.push({ question: q, answerList: list, source, raw: answer, options: opts4, kind, multiple });
+        }
+        return out;
+    }
+    function kindOfType(t) {
+        if (/判断|^4$/.test(t)) return 'judge';
+        if (/填空|^3$/.test(t)) return 'blank';
+        if (/简答|问答|论述|^5$/.test(t)) return 'essay';
+        return 'choice';
+    }
+    function buildPaperPayload(platform, target, answered) {
+        const list = answered.map((item, idx) => ({
+            questionNo: idx + 1,
+            optionSort: item.options.map(o => o.key).join(''),
+            answer: item.answerList.join('|'),
+            paperId: item.question.id || item.question.questionId || item.question.questionid,
+        }));
+        if (platform === 'zyk') {
+            return {
+                categoryId: target.categoryId || 1, courseId: target.courseId, courseInfoId: target.courseInfoId,
+                device: 1, examId: target.examId, examTime: 80 + Math.floor(Math.random() * 220),
+                groupId: '0', isLast: true, taskExamProblemRecordList: list,
+                id: target.taskId || '', status: '', updateBy: '', updateTime: '', userId: '', resitId: '',
+            };
+        }
+        if (platform === 'ai') {
+            return {
+                courseId: target.courseId, courseInfoId: target.courseInfoId, examId: target.examId,
+                examName: target.examName || '', device: 1, categoryId: '1', examTime: 600,
+                groupId: 0, isLast: true, id: target.recordId || '',
+                taskExamProblemRecordList: list,
+            };
+        }
+        return null;
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 6b. 整门课：递归扫树 → 逐任务直提 → 汇总
+     * ------------------------------------------------------------------ */
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    /** 单层扫描：按当前平台取某个 parentId 下的直接子任务 */
+    async function scanOnce(target) {
+        if (state.platform === 'zyk') return Adapters.zyk.tasks(target.courseInfoId, target.parentId, target.level);
+        if (state.platform === 'zjy2') return Adapters.zjy2.tasks(target.courseId, target.courseInfoId, target.classId, target.parentId, target.level);
+        if (state.platform === 'ai') return Adapters.ai.cells(target.courseInfoId, target.parentId);
+        return [];
+    }
+
+    /** 递归展开课程目录，返回扁平任务列表 [{id, name, fileType, parentId, level, ...}] */
+    async function scanTree(target, options) {
+        const o = options || {};
+        const out = [];
+        const seen = new Set();
+        const walk = async (parentId, level) => {
+            if (level > (o.maxDepth || 6)) return;
+            const kids = await scanOnce(Object.assign({}, target, { parentId, level }));
+            for (const node of kids || []) {
+                const id = String(node.id != null ? node.id : '');
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                const type = kindOf(node);
+                const rec = node.studentStudyRecord || null;
+                out.push({
+                    id, name: String(node.name || ''), fileType: String(node.fileType || ''),
+                    parentId: String(node.parentId != null ? node.parentId : parentId),
+                    level, kind: type,
+                    done: !!(rec && Number(rec.totalNum) > 0 && Number(rec.actualNum) >= Number(rec.totalNum)),
+                    record: rec, raw: node,
+                });
+                const isFolder = type === 'folder' || node.children === true;
+                if (isFolder || !node.fileType) await walk(id, level + 1);
+            }
+        };
+        await walk(o.rootParentId != null ? o.rootParentId : 0, 1);
+        return out;
+    }
+
+    /** 对整门课执行：只读扫描 → 逐个提交 → 每步回读校验 */
+    async function runCourse(target, options) {
+        const o = options || {};
+        if (!(await ensureAuth())) return { ok: false, reason: '未获取到鉴权', tasks: [] };
+        const tasks = await scanTree(target, o);
+        const actionable = tasks.filter(t => t.kind !== 'manual' && t.kind !== 'exam' && t.kind !== 'folder');
+        const results = [];
+        say('共 ' + tasks.length + ' 个节点，其中 ' + actionable.length + ' 个可直提');
+        for (let i = 0; i < actionable.length; i++) {
+            const t = actionable[i];
+            if (o.skipDone !== false && t.done) { results.push({ id: t.id, name: t.name, ok: true, skipped: true }); continue; }
+            if (o.signal && o.signal.aborted) break;
+            const r = await studyOnce(Object.assign({}, target, { task: t.raw, parentId: t.parentId }));
+            results.push(Object.assign({ id: t.id, name: t.name, kind: t.kind }, r));
+            say('[' + (i + 1) + '/' + actionable.length + '] ' + t.name.slice(0, 20) + '：' + (r.ok ? (r.verified ? '已确认' : '已提交') : '失败'));
+            if (o.delayMs !== 0) await sleep(o.delayMs || 800);
+        }
+        return {
+            ok: results.every(r => r.ok || r.skipped),
+            tasks: results,
+            summary: {
+                total: tasks.length, submitted: results.filter(r => !r.skipped).length,
+                verified: results.filter(r => r.verified).length,
+                failed: results.filter(r => !r.ok).map(r => ({ id: r.id, name: r.name, reason: r.reason })),
+            },
+        };
+    }
+
+    /** 找出当前平台某课程下的考试/作业任务 */
+    async function scanExams(target, options) {
+        const tasks = await scanTree(target, options);
+        return tasks.filter(t => t.kind === 'exam');
+    }
+
+    /**
+     * 补齐交卷必需的 courseId / classId：
+     * zyk 的交卷包要 courseId，但页面 URL 通常只有 courseInfoId，从我的课程列表里按 courseInfoId 反查。
+     */
+    async function resolveTarget(target) {
+        const t = Object.assign({}, target);
+        if (!t.courseId || (state.platform === 'zjy2' && !t.classId)) {
+            try {
+                let rows = [];
+                if (state.platform === 'zyk') rows = await Adapters.zyk.courses(1);
+                else if (state.platform === 'zjy2') rows = await Adapters.zjy2.courses();
+                else if (state.platform === 'ai') rows = await Adapters.ai.courses(1);
+                for (const row of rows || []) {
+                    const infoId = String(row.courseInfoId || row.courseInfoid || row.infoId || '');
+                    const courseId = String(row.courseId || row.courseid || row.id || '');
+                    const classId = String(row.classId || row.classid || '');
+                    const matchInfo = !t.courseInfoId || infoId === String(t.courseInfoId);
+                    const matchCourse = t.courseId && courseId === String(t.courseId);
+                    if ((matchInfo || matchCourse) && courseId) {
+                        if (!t.courseId) t.courseId = courseId;
+                        if (!t.classId && classId) t.classId = classId;
+                        if (!t.courseInfoId && infoId) t.courseInfoId = infoId;
+                        if (!t.className && row.className) t.className = String(row.className);
+                        trace('resolve', { courseId: t.courseId, classId: t.classId });
+                        break;
+                    }
+                }
+            } catch (e) { trace('resolve.error', String(e && e.message || e)); }
+        }
+        return t;
+    }
+
+    /** 做一份卷子：取题 → 逐题问答案 → 组包 → 提交 */
+    async function runPaper(target, options) {
+        const o = options || {};
+        if (!(await ensureAuth())) return { ok: false, reason: '未获取到鉴权' };
+        const full = await resolveTarget(target);
+        if (state.platform === 'zyk' && !full.courseId) return { ok: false, reason: '缺少 courseId（交卷包必填），无法反查' };
+        const paper = await Adapters[state.platform].paper(o.examId, o.groupId);
+        if (!paper) return { ok: false, reason: '取不到试卷' };
+        const answered = await answerQuestions(paper, o);
+        const payload = buildPaperPayload(state.platform, Object.assign({}, full, { examId: o.examId }), answered);
+        if (!payload) return { ok: false, reason: '该平台暂不支持自动交卷' };
+        const submit = state.platform === 'zyk' ? Adapters.zyk.submitAnswer : Adapters.ai.submitExam;
+        const r = await submit(payload);
+        return {
+            ok: r.ok, payload, answered: answered.map(a => ({
+                title: a.question.title, raw: a.raw, list: a.answerList, source: a.source,
+            })), raw: r.raw && { status: r.raw.status, text: String(r.raw.text || '').slice(0, 300) },
+        };
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 7. 对外入口
+     * ------------------------------------------------------------------ */
+    return {
+        platform: PLATFORM,
+        state,
+        adapters: Adapters,
+        crypto: { aesEncrypt, md5, b64encode },
+        ensureAuth,
+        readStoredToken,
+        studyOnce,
+        answerQuestions,
+        buildPaperPayload,
+        optionsOf,
+        toAnswerList,
+        scanTree,
+        runCourse,
+        scanExams,
+        runPaper,
+        resolveTarget,
+        scanOnce,
+        /** 扫当前平台在某课程下的所有任务（只读，不提交） */
+        scan: scanOnce,
+    };
+}
+    // END ICVE API
+
+    // BEGIN ICVE DIRECT RUNNER
+    // ================================================================== *
+    // 智慧职教协议直提执行层
+    //   - 学习：this.api.runCourse() 走三家平台的 studyRecord 接口，逐任务回读校验
+    //   - 答题：this.api.runPaper()，答案来自本地题库 / 远程库 / 后端 / AI（复用现有来源顺序）
+    //   - 与页面驱动路径互不干扰：页面路径仍按原生控件保存，这里是独立入口
+    // ================================================================== *
+    const IcveDirect = {
+        busy: false,
+        api: null,          // 由 main 注入（createIcveApi 的实例）
+        state: { running: false, done: 0, total: 0, message: '', summary: null, lastRun: null },
+        controller: null,
+        bind(api) { this.api = api || null; return this; },
+
+        enabled() {
+            try { return ConfigStore.get().sources.icveDirect !== false; } catch (e) { return true; }
+        },
+        answerEnabled() {
+            try { return ConfigStore.get().sources.icveAnswer !== false; } catch (e) { return true; }
+        },
+        delay() {
+            try {
+                const v = Number(ConfigStore.get().sources.icveDelay);
+                return Number.isFinite(v) && v >= 0 ? v : 800;
+            } catch (e) { return 800; }
+        },
+        say(text) { this.state.message = String(text); _ulIcveState(text); this.sync(); },
+        sync() {
+            const el = document.getElementById('ul_icve_state');
+            if (el) el.textContent = this.state.message || '未开始';
+            const bar = document.getElementById('ul_icve_bar');
+            if (bar) {
+                bar.max = Math.max(1, this.state.total);
+                bar.value = Math.min(this.state.done, this.state.total);
+                bar.hidden = !this.state.total;
+            }
+            const btn = document.getElementById('ul_icve_run');
+            if (btn) btn.disabled = this.state.running;
+            const stop = document.getElementById('ul_icve_stop');
+            if (stop) stop.hidden = !this.state.running;
+        },
+
+        /** 从当前页面 URL 与目录对象里推断课程参数（三家平台字段各不相同） */
+        context() {
+            let u;
+            try { u = new URL(location.href); } catch (e) { return null; }
+            const q = k => { const v = u.searchParams.get(k); return v ? String(v) : ''; };
+            const vm = (function () { try { return _ulCourseVM ? _ulCourseVM() : null; } catch (e) { return null; } })();
+            const info = (vm && (vm.courseInfo || vm.designData || vm.info)) || {};
+            const pick = (...keys) => {
+                for (const k of keys) {
+                    const v = info[k];
+                    if (v != null && String(v) !== '') return String(v);
+                }
+                return '';
+            };
+            const base = {
+                courseInfoId: q('courseInfoId') || pick('courseInfoId', 'id'),
+                courseId: q('courseId') || pick('courseId'),
+                classId: q('classId') || pick('classId'),
+                studentId: pick('studentId', 'userId') || String($w.currentUserId || ''),
+                token: '',
+            };
+            try { base.token = String(ConfigStore.get().sources.icveToken || '').trim(); } catch (e) { }
+            return base.courseInfoId || base.courseId ? base : null;
+        },
+
+        async ensureReady() {
+            if (!this.api) { this.say('当前页面不是智慧职教平台'); return false; }
+            if (!this.context()) { this.say('未识别到课程参数，请在课程目录页或课件页打开'); return false; }
+            const ok = await this.api.ensureAuth();
+            if (!ok) { this.say('未拿到 token：可在【来源】页填写 ICVE Token，或先在浏览器里正常登录一次'); return false; }
+            return true;
+        },
+
+        /** 只读扫描：把目录列出来，不提交任何东西 */
+        async scan() {
+            if (!(await this.ensureReady())) return null;
+            const ctx = this.context();
+            this.say('正在读取课程目录…');
+            const tasks = await this.api.scanTree(ctx, {});
+            const group = k => tasks.filter(t => t.kind === k).length;
+            this.say('目录共 ' + tasks.length + ' 个节点：视频/音频 ' + group('media') + '、文档 ' + group('document') + '、作业 ' + group('exam') + '、讨论 ' + group('manual'));
+            console.log('[Ulearn-Helper][icve] 目录扫描', tasks.map(t => ({ id: t.id, name: t.name, kind: t.kind, done: t.done })));
+            return tasks;
+        },
+
+        /** 学习：整门课直提 */
+        async run() {
+            if (this.busy) { this.say('正在执行，请先停止'); return; }
+            if (!this.enabled()) { this.say('协议直提已在设置里关闭'); return; }
+            if (!(await this.ensureReady())) return;
+            const ctx = this.context();
+            this.busy = true;
+            this.state.running = true;
+            this.state.done = 0;
+            this.state.summary = null;
+            this.controller = new AbortController();
+            this.sync();
+            try {
+                const tasks = await this.api.scanTree(ctx, {});
+                const targets = tasks.filter(t => t.kind !== 'manual' && t.kind !== 'exam' && t.kind !== 'folder');
+                this.state.total = targets.length;
+                this.sync();
+                this.say('共 ' + targets.length + ' 个可直提任务，开始提交…');
+                const results = [];
+                for (const t of targets) {
+                    if (this.controller.signal.aborted) break;
+                    const r = await this.api.studyOnce(Object.assign({}, ctx, { task: t.raw, parentId: t.parentId }));
+                    results.push(Object.assign({ id: t.id, name: t.name, kind: t.kind }, r));
+                    this.state.done++;
+                    this.say('[' + this.state.done + '/' + this.state.total + '] ' + String(t.name).slice(0, 24) + '：'
+                        + (r.ok ? (r.verified ? '服务器已确认' : '已提交') : '失败 ' + (r.reason || '')));
+                    this.sync();
+                    if (this.delay()) await new Promise(res => setTimeout(res, this.delay()));
+                }
+                const summary = {
+                    total: tasks.length,
+                    submitted: results.filter(r => r.accepted).length,
+                    verified: results.filter(r => r.verified).length,
+                    failed: results.filter(r => !r.ok).map(r => ({ id: r.id, name: r.name, reason: r.reason })),
+                    at: Date.now(),
+                };
+                this.state.summary = summary;
+                this.state.lastRun = results;
+                this.say('完成：确认 ' + summary.verified + ' / 提交 ' + summary.submitted + ' / 失败 ' + summary.failed.length);
+                console.log('[Ulearn-Helper][icve] 直提结果', results);
+                return summary;
+            } catch (e) {
+                this.say('执行异常：' + String(e && e.message || e));
+                console.error('[Ulearn-Helper][icve] 直提异常', e);
+            } finally {
+                this.busy = false;
+                this.state.running = false;
+                this.sync();
+            }
+        },
+
+        stop() {
+            if (this.controller) this.controller.abort();
+            this.say('已请求停止');
+        },
+
+        /** 统一问答案：本地题库 → 远程库 → 后端 → AI（沿用来源设置） */
+        async ask(q) {
+            const plan = SourceConfig.plan();
+            const info = Object.assign({}, q);
+            for (const id of plan) {
+                if (id === 'local') {
+                    const hit = Bank.find(q.title, q.options || [], info);
+                    if (hit) return { answer: hit, source: '本地题库' };
+                    continue;
+                }
+                if (id === 'remote') {
+                    if (!RemoteBank.urls().length) continue;
+                    try { if (RemoteBank.needSync()) await RemoteBank.sync(); } catch (e) { }
+                    const hit = Bank.find(q.title, q.options || [], info);
+                    if (hit) return { answer: hit, source: '远程题库' };
+                    continue;
+                }
+                if (id === 'server') {
+                    if (!ServerConfig.ready()) continue;
+                    try {
+                        const r = await Util.server_cha(q.title, q.typeName, q.options || [], q.kind, info, {});
+                        if (r && r.ok && r.answer) return { answer: r.answer, source: r.source === 'ai' ? '服务器AI' : '服务器题库' };
+                    } catch (e) { }
+                    continue;
+                }
+                if (id.indexOf('ai:') === 0) {
+                    const ai = SourceConfig.aiOf(id);
+                    if (!ai || !SourceConfig.aiReady(ai)) continue;
+                    const prompt = Util._build_prompt(q.title, q.options || [], q.kind, q.typeName, '', '', info);
+                    let raw = '';
+                    try { raw = await Util.ask_ai(prompt, ai, {}); } catch (e) { raw = ''; }
+                    if (!raw) continue;
+                    const answer = Util.parse_ai(raw, q.options || [], q.kind, q.typeName, info);
+                    if (answer) return { answer, source: 'AI(' + (ai.name || ai.model) + ')' };
+                }
+            }
+            return { answer: '', source: '' };
+        },
+
+        /** 答题：扫出课程下所有作业/测验，逐份取题、作答、提交 */
+        async runPapers() {
+            if (this.busy) { this.say('正在执行，请先停止'); return; }
+            if (!this.answerEnabled()) { this.say('协议答题已在设置里关闭'); return; }
+            if (!(await this.ensureReady())) return;
+            const ctx = this.context();
+            this.busy = true;
+            this.state.running = true;
+            this.sync();
+            try {
+                const tasks = await this.api.scanTree(ctx, {});
+                const exams = tasks.filter(t => t.kind === 'exam');
+                if (!exams.length) { this.say('目录里没有找到作业/测验任务'); return; }
+                this.state.total = exams.length;
+                this.state.done = 0;
+                this.sync();
+                const out = [];
+                for (const t of exams) {
+                    if (this.controller && this.controller.signal.aborted) break;
+                    this.say('答题：' + String(t.name).slice(0, 24));
+                    const examId = String((t.raw && (t.raw.examId || t.raw.id)) || t.id);
+                    const r = await this.api.runPaper(Object.assign({}, ctx, { taskId: t.id }), {
+                        examId, ask: q => this.ask(q), delayMs: this.delay(),
+                    });
+                    out.push(Object.assign({ name: t.name, examId }, r));
+                    this.state.done++;
+                    this.say('[' + this.state.done + '/' + this.state.total + '] ' + String(t.name).slice(0, 20) + '：' + (r.ok ? '已提交' : '失败 ' + (r.reason || '')));
+                    this.sync();
+                    if (this.delay()) await new Promise(res => setTimeout(res, this.delay()));
+                }
+                this.state.papers = out;
+                console.log('[Ulearn-Helper][icve] 答题结果', out);
+                return out;
+            } catch (e) {
+                this.say('答题异常：' + String(e && e.message || e));
+            } finally {
+                this.busy = false;
+                this.state.running = false;
+                this.sync();
+            }
+        },
+    };
+    // END ICVE DIRECT RUNNER
 
     // BEGIN ICVE STUDY ADAPTER
     function createIcveStudy(env) {
@@ -736,11 +1695,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.20.1');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.0');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.20.1',
+        codeVersion: '4.21.0',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
@@ -777,6 +1736,21 @@
         running: () => !!youxueyuan.timer, paused: () => !!youxueyuan._manualPaused,
         say: text => _ulStudyState(text), halt: text => { youxueyuan.stop(); _ulStudyState(text); }
     }) : null;
+    // 智慧职教协议直提层（逆向自 智慧职教助手 7.0.3：AES-128-ECB / MD5 派生 key + 三个 studyRecord 接口）
+    const IcveApi = IS_ICVE ? createIcveApi({
+        platform: (function () {
+            const h = location.hostname;
+            if (h.indexOf('zyk.') === 0) return 'zyk';
+            if (h.indexOf('zjy2.') === 0) return 'zjy2';
+            if (h.indexOf('ai.') === 0) return 'ai';
+            if (h.indexOf('mooc.') === 0 || h.indexOf('icve-mooc.') === 0) return 'mooc';
+            return '';
+        })(),
+        window: $w, document: $w.document,
+        config: () => ConfigStore.get().sources,
+        say: text => { try { _ulIcveState(text); } catch (e) { } },
+    }) : null;
+    IcveDirect.bind(IcveApi);
 
     const $version = GM_info.script.version.replaceAll('.','');
 
@@ -1753,7 +2727,7 @@
         legacy = legacy || {};
         let doc = {
             v: 3,
-            sources: { order: ["ai:default", "local", "remote", "server"], enabled: {}, fallthrough: true, rotate: false, aiGap: 1000, aiConcurrency: 2, batch: true, cacheFirst: true, autoMute: true, autoStudy: true, directVideo: true, studyPanel: true, studyDashboard: true, domAgent: true },
+            sources: { order: ["ai:default", "local", "remote", "server"], enabled: {}, fallthrough: true, rotate: false, aiGap: 1000, aiConcurrency: 2, batch: true, cacheFirst: true, autoMute: true, autoStudy: true, directVideo: true, studyPanel: true, studyDashboard: true, domAgent: true, icveDirect: true, icveAnswer: true, icveToken: "", icveDelay: 800 },
             ais: [],
             remote: { urls: [], auto: true, hours: 6, last: 0 },
             server: { base: "", token: "" },
@@ -1798,7 +2772,7 @@
     const normalizeConfig = function (doc, aiDefaults, meta) {
         let d = Object.assign({}, doc || {});
         d.v = 3;
-        d.sources = Object.assign({ order: [], enabled: {}, fallthrough: true, rotate: false, aiGap: 1000, aiConcurrency: 2, batch: true, cacheFirst: true, autoMute: true, autoStudy: true, directVideo: true, studyPanel: true, studyDashboard: true, domAgent: true }, d.sources || {});
+        d.sources = Object.assign({ order: [], enabled: {}, fallthrough: true, rotate: false, aiGap: 1000, aiConcurrency: 2, batch: true, cacheFirst: true, autoMute: true, autoStudy: true, directVideo: true, studyPanel: true, studyDashboard: true, domAgent: true, icveDirect: true, icveAnswer: true, icveToken: "", icveDelay: 800 }, d.sources || {});
         // 存储被写成 null/数组等异常类型时兜底，避免此后每次 get() 都抛异常
         if (!d.sources.enabled || typeof d.sources.enabled != "object" || Array.isArray(d.sources.enabled)) d.sources.enabled = {};
         if (!Array.isArray(d.sources.order)) d.sources.order = [];
@@ -4979,6 +5953,15 @@
         try { let el = document.getElementById("ul_study_state"); if (el) el.textContent = txt; } catch (e) { }
         try { let st = document.querySelector("#server_status"); if (st) st.innerText = txt; } catch (e) { }
     }
+    // 智慧职教协议层的独立状态行（不与页面驱动路径互相覆盖）
+    function _ulIcveState(txt) {
+        try {
+            let el = document.getElementById("ul_icve_state");
+            if (el) el.textContent = String(txt);
+            else console.log("[Ulearn-Helper][icve] " + txt);
+        } catch (e) { }
+        try { RuntimeTrace.record('icve_state', { status: String(txt).slice(0, 180) }); } catch (e) { }
+    }
     // 找视频：顶层 .file-media → 同源 iframe 里 → 原生 <video>
     function _ulVideoNodes() {
         try { let $v = jquery(".file-media"); if ($v.length) return $v; } catch (e) { }
@@ -6510,6 +7493,13 @@ function Init() {
         .ul-study-rate { font-size: 11.5px; color: var(--ul-muted); }
         .ul-study-rate input { width: 50px; height: 24px; padding: 2px 5px; border: 1px solid var(--ul-line-2); border-radius: 6px; background: var(--ul-bg); color: var(--ul-fg); }
         .ul-study-state { flex: 1 1 100%; font-size: 11.5px; color: var(--ul-muted); }
+        /* 智慧职教协议直提区 */
+        .ul-icve-box { margin: 10px 0 2px; padding: 9px 10px; border: 1px solid var(--ul-line); border-radius: 8px; background: var(--ul-bg-soft); }
+        .ul-icve-box h3 { margin: 0 0 4px; font-size: 12.5px; font-weight: 650; }
+        .ul-icve-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+        .ul-icve-row button { flex: none; }
+        .ul-icve-box progress { width: 100%; height: 8px; margin-top: 7px; accent-color: var(--ul-accent, #2869cc); }
+        .ul-icve-state { margin-top: 5px; font-size: 11.5px; color: var(--ul-muted); line-height: 1.45; word-break: break-all; }
         .ul-panel img { max-width: 100%; height: auto; }
         /* Compact, resizable workspace. */
         .ul-panel { display:flex; flex-direction:column; box-sizing:border-box; max-width:calc(100vw - 8px); max-height:calc(100vh - 8px); }
@@ -8956,6 +9946,34 @@ function AntiCheatProbe() {
                 hint: "默认 2；请求仍按间隔启动，遇到限流可降为 1"
             }, ConfigStore.get());
             wrap.appendChild(concurrencyF.el);
+            // 智慧职教：协议层直提（不经过页面控件）；放在最后，保持原有表单项顺序不变
+            const icveBox = UI.el('section', { class: 'ul-icve-box' });
+            icveBox.appendChild(UI.el('h3', { text: '智慧职教协议直提' }));
+            icveBox.appendChild(UI.el('div', { class: 'ul-f-h', text: '直接调用平台的 studyRecord 接口，逐任务回读校验；与页面控件路径互不影响。' }));
+            icveBox.appendChild(mk("sources.icveDirect", "启用协议直提", "课堂/资源库/职教云/AI优课通用"));
+            icveBox.appendChild(mk("sources.icveAnswer", "启用协议答题", "答案仍按来源顺序取，交卷走平台 exam/record"));
+            const tokenField = UI.field({
+                path: "sources.icveToken", type: "secret", label: "ICVE Token（可留空）",
+                hint: "留空则自动从当前页面的登录态兑换 access_token；多开或页面取不到时再手填"
+            }, ConfigStore.get());
+            icveBox.appendChild(tokenField.el);
+            const delayField = UI.field({
+                path: "sources.icveDelay", type: "number", label: "任务间隔（毫秒）", min: 0, max: 10000,
+                hint: "默认 800，逐任务提交之间的等待"
+            }, ConfigStore.get());
+            icveBox.appendChild(delayField.el);
+            const row = UI.el('div', { class: 'ul-icve-row' });
+            const scanBtn = UI.el('button', { type: 'button', class: 'ul-sbtn', text: '只读扫描目录' });
+            UI.cap(scanBtn, 'click', function () { scanBtn.disabled = true; IcveDirect.scan().finally(() => { scanBtn.disabled = false; }); });
+            const runBtn = UI.el('button', { type: 'button', class: 'ul-btn ul-btn-primary', text: '开始直提' });
+            UI.cap(runBtn, 'click', function () { IcveDirect.run(); });
+            const stopBtn = UI.el('button', { type: 'button', class: 'ul-sbtn', text: '停止', hidden: true });
+            UI.cap(stopBtn, 'click', function () { IcveDirect.stop(); });
+            row.appendChild(scanBtn); row.appendChild(runBtn); row.appendChild(stopBtn);
+            icveBox.appendChild(row);
+            icveBox.appendChild(UI.el('progress', { id: 'ul_icve_bar', max: 1, value: 0, hidden: true }));
+            icveBox.appendChild(UI.el('div', { class: 'ul-icve-state', id: 'ul_icve_state', text: '未开始' }));
+            wrap.appendChild(icveBox);
             return { el: wrap, fields: [] };
         },
         // 分页：AI 接口
