@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.1
+// @version      4.21.2
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -397,7 +397,20 @@
                 await call(HOSTS.zyk + '/prod-api/teacher/courseDesign/viewCount/' + encodeURIComponent(sourceId), { method: 'POST' });
                 const r = await call(HOSTS.zyk + '/prod-api/teacher/courseContent/' + encodeURIComponent(sourceId));
                 const rec = r.json && r.json.data && r.json.data.studentStudyRecord;
-                return rec ? rec.id : null;
+                return rec && rec.id != null ? rec.id : null;
+            },
+            /** 读单个资源详情（含 studentStudyRecord），同时把原始响应带回用于诊断 */
+            async detail(sourceId) {
+                const r = await call(HOSTS.zyk + '/prod-api/teacher/courseContent/' + encodeURIComponent(sourceId));
+                const data = (r.json && r.json.data) || null;
+                return {
+                    ok: !!(r.json && Number(r.json.code) === 200),
+                    code: r.json && r.json.code,
+                    msg: r.json && r.json.msg,
+                    data,
+                    record: (data && data.studentStudyRecord) || null,
+                    keys: data ? Object.keys(data) : [],
+                };
             },
             async progress(courseInfoId, sourceId) {
                 const r = await call(HOSTS.zyk + '/prod-api/teacher/courseContent/' + encodeURIComponent(sourceId));
@@ -409,7 +422,10 @@
                 const r = await call(HOSTS.zyk + '/prod-api/teacher/studyRecord', {
                     method: 'PUT', body, headers: Object.assign(authHeaders(), { 'Content-Type': 'application/json' }),
                 });
-                return { ok: r.text.indexOf('操作成功') >= 0 || (r.json && r.json.code === 200), raw: r };
+                // 原版只认响应正文包含「操作成功」；HTTP 200 + code:200 不代表记录真的写了
+                const text = String(r.text || '');
+                const ok = text.indexOf('操作成功') >= 0;
+                return { ok, raw: r, text: text.slice(0, 200) };
             },
             async paper(examId) {
                 const r = await call(HOSTS.zyk + '/prod-api/teacher/exam/paper?id=' + encodeURIComponent(examId));
@@ -524,8 +540,26 @@
         if (p === 'zyk') {
             const { courseInfoId, task } = target;
             const total = durationOf(task, kindOf(task));
-            const id = task.studentStudyRecord && task.studentStudyRecord.id || await Adapters.zyk.recordId(task.id);
-            if (!id) return { ok: false, reason: '拿不到 studyRecord.id' };
+            // 原版 get_save_study_need_id 在 studentStudyRecord 为 None 时 return None，
+            // 然后照样把 "id": null 发出去，让服务端按 sourceId 建记录。
+            // 之前这里直接 return 失败，等于把能跑的情况判死了。
+            let id = (task.studentStudyRecord && task.studentStudyRecord.id) || null;
+            let detail = null;
+            if (id == null) {
+                id = await Adapters.zyk.recordId(task.id);
+            }
+            if (id == null) {
+                detail = await Adapters.zyk.detail(task.id);
+                trace('zyk.noRecordId', { sourceId: task.id, code: detail.code, msg: detail.msg, keys: detail.keys });
+                // 详情接口本身失败（课程参数不对 / 资源不属于该课程）才是真错误
+                if (!detail.ok) {
+                    return {
+                        ok: false, accepted: false, ms: Date.now() - t0, verified: false,
+                        reason: '资源详情接口返回 code=' + detail.code + (detail.msg ? '（' + detail.msg + '）' : '')
+                            + '，通常是 courseInfoId 与资源不匹配',
+                    };
+                }
+            }
             const payload = {
                 courseInfoId, id, parentId: task.parentId || 0, studyTime: total,
                 sourceId: task.id, studentId: target.studentId,
@@ -534,9 +568,12 @@
             const r = await Adapters.zyk.submit(payload);
             const back = await Adapters.zyk.progress(courseInfoId, task.id);
             const verified = !!back && Number(back.actualNum || 0) >= total;
+            let reason = '';
+            if (!r.ok) reason = '接口拒绝：' + String((r.raw && (r.raw.text || (r.raw.json && r.raw.json.msg))) || '').slice(0, 80);
+            else if (!verified) reason = '接口返回成功但回读 actualNum=' + (back && back.actualNum) + ' < ' + total;
             return {
                 ok: r.ok && verified, accepted: r.ok, ms: Date.now() - t0, payload, echoed: back, verified,
-                reason: r.ok && !verified ? '接口返回成功但回读 actualNum=' + (back && back.actualNum) + ' < ' + total : (r.ok ? '' : '接口拒绝'),
+                recordIdWasNull: id == null, reason,
             };
         }
         if (p === 'zjy2') {
@@ -1094,6 +1131,24 @@
                     + tasks.filter(t => t.kind === 'media' || t.kind === 'document').length + ' 个');
             } else if (!tasks.length) {
                 add(false, '目录为空或读取失败（可能是页面还没加载完，或该课程目录接口结构不同）');
+            }
+
+            // ⑤ 拿一个真实任务做端到端探针：这是「拿不到 studyRecord.id / 提交失败」的唯一可靠判据
+            const probe = tasks.find(t => t.kind === 'media' || t.kind === 'document');
+            if (probe && this.api.platform === 'zyk') {
+                try {
+                    const d = await this.api.adapters.zyk.detail(probe.id);
+                    add(d.ok, '资源详情接口 code=' + d.code + (d.msg ? '（' + d.msg + '）' : '')
+                        + '，返回字段：' + (d.keys.length ? d.keys.join(',') : '空'));
+                    if (!d.ok) add(false, '详情接口失败 → courseInfoId 与资源不属于同一门课，请确认在课程目录页点按钮');
+                    else if (!d.record) add(true, '该资源尚无 studentStudyRecord（首次学习属正常，提交时 id 传 null 由服务端创建）');
+                    else add(true, '已存在 studentStudyRecord，id=' + d.record.id);
+                } catch (e) { add(false, '详情接口异常：' + (e && e.message || e)); }
+            } else if (probe && this.api.platform === 'zjy2') {
+                try {
+                    const info = await this.api.adapters.zjy2.info(probe.id);
+                    add(!!info, info ? '资源详情可读，studentStudyRecord=' + (info.studentStudyRecord ? '有' : '无（首次学习）') : '资源详情为空');
+                } catch (e) { add(false, '资源详情异常：' + (e && e.message || e)); }
             }
             this.say(lines.join('\n'));
             return lines;
@@ -1870,11 +1925,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.1');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.2');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.1',
+        codeVersion: '4.21.2',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
@@ -5658,20 +5713,24 @@
             this.$rateText = jquery('<span class="ul-study-rate">倍速 <input id="rate" type="text" value="6.00">x</span>');
             this.$rateText.find('input').val(savedRate);
             let $row = jquery('<div class="ul-study-row" id="ul_study_row"></div>');
-            $row.append(this.$startBtn).append(this.$stopBtn).append(this.$rateText);
-            // 智慧职教：一键协议直提（不放设置里，主面板直接给按钮）
-            if (typeof IS_ICVE !== 'undefined' && IS_ICVE && typeof IcveDirect !== 'undefined') {
+            // 智慧职教：这里只保留一条路径。
+            // 协议直提能直接改服务器记录，播放器路径（开始刷课）会和它抢同一批任务、互相覆盖进度，
+            // 所以职教页面不给「开始刷课」，只给「一键直提 + 诊断」；优学院仍用原来的开始刷课。
+            const _icveMode = typeof IS_ICVE !== 'undefined' && IS_ICVE && typeof IcveDirect !== 'undefined';
+            if (_icveMode) {
                 const $oneKey = jquery('<button type="button" class="ul-btn ul-btn-primary" id="ul_icve_onekey">一键直提</button>');
                 const $diag = jquery('<button type="button" class="ul-btn" id="ul_icve_diag">诊断</button>');
                 $oneKey.on('click', () => { IcveDirect.run(); });
                 $diag.on('click', () => { IcveDirect.diagnose(); });
                 $row.append($oneKey).append($diag);
+            } else {
+                $row.append(this.$startBtn).append(this.$stopBtn).append(this.$rateText);
             }
             const dashboardBtn=jquery('<button type="button" class="ul-btn" id="ul_study_dashboard">学习面板</button>');
             dashboardBtn.on('click',()=>{if(typeof StudyDashboard!=='undefined')StudyDashboard.open(true);});
             $row.append(dashboardBtn);
-            $row.append(jquery('<span class="ul-study-state" id="ul_study_state">未开始</span>'));
-            $row.append(jquery('<span class="ul-icve-state" id="ul_icve_state"></span>'));
+            if (!_icveMode) $row.append(jquery('<span class="ul-study-state" id="ul_study_state">未开始</span>'));
+            $row.append(jquery('<span class="ul-icve-state" id="ul_icve_state">' + (_icveMode ? '未开始' : '') + '</span>'));
             try {
                 let $tools = jquery('.ul-panel .ul-tools');
                 if ($tools.length) $tools.after($row);
@@ -7884,7 +7943,9 @@ function Init() {
         if (_ulIsStudyPage()) {
             if (youxueyuan.init() && !youxueyuan._autoScheduled) {
                 youxueyuan._autoScheduled = true;
-                if (ConfigStore.get().sources.autoStudy !== false) {
+                // 智慧职教不该自动跑播放器路径：协议直提已经把记录写满了，
+                // 再让播放器去播同一批视频只会互相覆盖进度、白耗流量。
+                if (ConfigStore.get().sources.autoStudy !== false && !(typeof IS_ICVE !== 'undefined' && IS_ICVE)) {
                     youxueyuan._autoTimer = setTimeout(function () {
                         youxueyuan._autoTimer = null;
                         if (!_ulIsStudyPage()) return;
