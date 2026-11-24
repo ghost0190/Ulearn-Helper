@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.8
+// @version      4.21.9
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -229,7 +229,7 @@
      * ------------------------------------------------------------------ */
     const state = { token: '', bearer: '', platform: PLATFORM, log: [], tokenFrom: '' };
     // 构建指纹：诊断输出里带上，更新没生效时一眼能看出来
-    state.buildTag = '4.21.8/leaf+level+1';
+    state.buildTag = '4.21.9/leaf+level+1';
     const say = text => { try { env.say(text); } catch (e) { } };
     const trace = (kind, detail) => { state.log.push({ t: Date.now(), kind, detail }); if (state.log.length > 200) state.log.shift(); };
 
@@ -407,7 +407,7 @@
                 const r = await call(HOSTS.zyk + '/prod-api/teacher/courseContent/' + encodeURIComponent(sourceId));
                 const data = (r.json && r.json.data) || null;
                 return {
-                    ok: !!(r.json && Number(r.json.code) === 200),
+                    ok: r.ok && Number(r.json?.code) === 200,
                     code: r.json && r.json.code,
                     msg: r.json && r.json.msg,
                     data,
@@ -583,23 +583,23 @@
             // 原版 get_save_study_need_id 在 studentStudyRecord 为 None 时 return None，
             // 然后照样把 "id": null 发出去，让服务端按 sourceId 建记录。
             // 之前这里直接 return 失败，等于把能跑的情况判死了。
-            let id = (task.studentStudyRecord && task.studentStudyRecord.id) || null;
-            let detail = null;
-            if (id == null) {
-                id = await Adapters.zyk.recordId(task.id);
+            const detail = await Adapters.zyk.detail(task.id);
+            if (!detail.ok || !detail.data) {
+                return { ok: false, accepted: false, verified: false,
+                    reason: '资源详情读取失败，已跳过提交（code=' + (detail.code ?? '未知') + '）' };
             }
-            if (id == null) {
-                detail = await Adapters.zyk.detail(task.id);
-                trace('zyk.noRecordId', { sourceId: task.id, code: detail.code, msg: detail.msg, keys: detail.keys });
-                // 详情接口 400「课件不存在」不代表不能提交：服务端按 sourceId 建记录，
-                // 详情接口读不到只说明这条路拿不到已有 record.id。先照常提交，让服务端给结论。
-            }
+            let id = detail.record?.id ?? task.studentStudyRecord?.id ?? null;
+            if (id == null) id = await Adapters.zyk.recordId(task.id);
             const payload = {
                 courseInfoId, id, parentId: task.parentId || 0, studyTime: total,
                 sourceId: task.id, studentId: target.studentId,
                 actualNum: total, lastNum: total, totalNum: total,
             };
             const r = await Adapters.zyk.submit(payload);
+            if (!r.ok && /您没学习当前开课/.test(String(r.raw?.json?.msg || ''))) {
+                return { ok: false, accepted: false, verified: false, stopCourse: true,
+                    reason: '平台提示「您没学习当前开课」，已停止。请在智慧职教「我的课程」确认当前账号和开课班次。' };
+            }
             const back = await Adapters.zyk.progress(courseInfoId, task.id);
             // 回读依赖 courseContent/{id}；这个接口对本资源不可用（400）时，
             // 不能把「读不到」当成「没写进去」——否则提交成功也会被判失败。
@@ -871,14 +871,19 @@
         return out;
     }
 
-    /** 叶子节点的类型：有元数据就按元数据细分，没有就按扩展名，再没有就默认文档 */
+    /** 叶子节点缺少类型证据时保留为未分类。 */
     function leafKind(task) {
-        const k = kindOf(task);
-        if (k === 'media' || k === 'document' || k === 'exam' || k === 'manual') return k;
-        const url = String((task && (task.fileUrl || task.fileGenUrl)) || '');
-        if (/\.(mp4|m4a|mp3|flv|mov|avi|wmv|m3u8)([?#]|$)/i.test(url)) return 'media';
-        if (task && (task.examId != null || /作业|测验|考试|练习/.test(String(task.name || '')))) return 'exam';
-        return 'document';
+        const raw = task.raw || task;
+        const examId = String(raw.examId ?? '').trim();
+        if (examId && !/^(?:0|null|undefined|false)$/i.test(examId)) return 'exam';
+        const fileType = String(raw.fileType || raw.type || raw.contentType || '').trim().toLowerCase();
+        const declared = Object.hasOwn(FILE_TYPE_MAP, fileType) ? FILE_TYPE_MAP[fileType] : 'unknown';
+        if (declared !== 'unknown' && declared !== 'folder') return declared;
+        if (/作业|测验|考试|练习/.test(String(raw.name || ''))) return 'exam';
+        const url = String(raw.fileUrl || raw.fileGenUrl || '').split(/[?#]/, 1)[0];
+        if (/\.(mp4|m4a|mp3|flv|mov|avi|wmv|m3u8)$/i.test(url)) return 'media';
+        if (/\.(pptx?|pdf|docx?|xlsx?|txt)$/i.test(url)) return 'document';
+        return 'unknown';
     }
 
     /** 递归展开课程目录，返回扁平任务列表 [{id, name, fileType, parentId, level, ...}]
@@ -914,7 +919,7 @@
                     fileUrl: String(node.fileUrl || node.fileGenUrl || ''),
                     typeId: node.typeId != null ? String(node.typeId) : '',
                     examId: node.examId, last: node.last,
-                    kind: kindOf(node),
+                    kind: state.platform === 'zyk' ? leafKind(node) : kindOf(node),
                     done: !!(rec && Number(rec.totalNum) > 0 && Number(rec.actualNum) >= Number(rec.totalNum)),
                     record: rec, raw: node, childCount: 0,
                 };
@@ -923,12 +928,9 @@
                 if (level < maxDepth) {
                     const n = await walk(id, level + 1);
                     if (n > 0) { task.childCount = n; task.kind = 'folder'; }
-                    else if (task.kind === 'folder') task.kind = kindOf({ resourceId: task.resourceId, fileUrl: task.fileUrl, typeId: task.typeId });
                 }
-                // 叶子节点就是学习单元。资源库的 resourceId/fileUrl 常常都是空的，
-                // 靠元数据判断内容会把整门课判成 0 个可直提——层级结构才是唯一可靠依据。
-                if (task.kind === 'unknown' || task.kind === 'folder') {
-                    if (!task.childCount) task.kind = leafKind(task);
+                if (!task.childCount && (task.kind === 'unknown' || task.kind === 'folder')) {
+                    task.kind = leafKind(task);
                 }
             }
             return added;
@@ -942,7 +944,7 @@
         const o = options || {};
         if (!(await ensureAuth())) return { ok: false, reason: '未获取到鉴权', tasks: [] };
         const tasks = await scanTree(target, o);
-        const actionable = tasks.filter(t => t.kind !== 'manual' && t.kind !== 'exam' && t.kind !== 'folder');
+        const actionable = tasks.filter(t => t.kind === 'media' || t.kind === 'document');
         const results = [];
         say('共 ' + tasks.length + ' 个节点，其中 ' + actionable.length + ' 个可直提');
         for (let i = 0; i < actionable.length; i++) {
@@ -952,6 +954,7 @@
             const r = await studyOnce(Object.assign({}, target, { task: t.raw, parentId: t.parentId }));
             results.push(Object.assign({ id: t.id, name: t.name, kind: t.kind }, r));
             say('[' + (i + 1) + '/' + actionable.length + '] ' + t.name.slice(0, 20) + '：' + (r.ok ? (r.verified ? '已确认' : '已提交') : '失败'));
+            if (r.stopCourse) { say(r.reason); break; }
             if (o.delayMs !== 0) await sleep(o.delayMs || 800);
         }
         return {
@@ -1187,7 +1190,7 @@
                 this.state.total = targets.length;
                 this.sync();
                 if (!targets.length) {
-                    this.say('目录里没有可直提的任务（共 ' + tasks.length + ' 个节点，作业/讨论/文件夹不计）');
+                    this.say('目录中没有已识别的视频或文档（共 ' + tasks.length + ' 个节点）。请从智慧职教「我的课程」打开对应班次，核对原生课件列表。');
                     this.toast('没有可直提的任务');
                     return;
                 }
@@ -1208,8 +1211,10 @@
                     this.say('[' + this.state.done + '/' + todo.length + '] ' + String(t.name).slice(0, 24) + '：'
                         + (r.ok ? (r.verified === true ? '服务器已确认' : r.verified === null ? '已提交（无法回读确认）' : '已提交') : '失败 ' + (r.reason || '')));
                     this.sync();
+                    if (r.stopCourse) break;
                     if (this.delay()) await new Promise(res => setTimeout(res, this.delay()));
                 }
+                const stopped = results.find(r => r.stopCourse);
                 const summary = {
                     total: tasks.length,
                     alreadyDone: targets.length - pending.length,
@@ -1221,7 +1226,7 @@
                 };
                 this.state.summary = summary;
                 this.state.lastRun = results;
-                const text = '完成：本次确认 ' + summary.verified + ' / 提交 ' + summary.submitted
+                const text = (stopped ? '已停止：' + stopped.reason + ' ' : '完成：') + '本次确认 ' + summary.verified + ' / 提交 ' + summary.submitted
                     + (summary.unconfirmed ? '（其中 ' + summary.unconfirmed + ' 个无法回读确认）' : '')
                     + ' / 失败 ' + summary.failed.length + '（原有已完成 ' + summary.alreadyDone + '）';
                 this.say(text);
@@ -2084,11 +2089,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.8');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.9');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.8',
+        codeVersion: '4.21.9',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
