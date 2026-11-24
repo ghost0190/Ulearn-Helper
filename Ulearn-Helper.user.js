@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.6
+// @version      4.21.7
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -228,6 +228,8 @@
      * 3. 请求与鉴权
      * ------------------------------------------------------------------ */
     const state = { token: '', bearer: '', platform: PLATFORM, log: [], tokenFrom: '' };
+    // 构建指纹：诊断输出里带上，更新没生效时一眼能看出来
+    state.buildTag = '4.21.7/leaf+level+1';
     const say = text => { try { env.say(text); } catch (e) { } };
     const trace = (kind, detail) => { state.log.push({ t: Date.now(), kind, detail }); if (state.log.length > 200) state.log.shift(); };
 
@@ -1254,6 +1256,16 @@
         async diagnose() {
             const lines = [];
             const add = (ok, text) => { lines.push((ok ? '✓ ' : '✗ ') + text); console.log('[Ulearn-Helper][icve][diag] ' + (ok ? 'OK ' : 'FAIL ') + text); };
+            // 版本与构建指纹：更新没生效时一眼能看出来，不用靠输出格式猜
+            const ver = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?';
+            const fp = (this.api && this.api.buildTag) || '(旧版无指纹)';
+            add(fp !== '(旧版无指纹)', '脚本版本 v' + ver + ' ｜ 协议层构建 ' + fp);
+            if (fp === '(旧版无指纹)') {
+                add(false, '协议层是旧版：Tampermonkey 里脚本未更新到 4.21.7，'
+                    + '请在管理面板点「检查更新」，或重新安装一次 raw 链接');
+                this.say(lines.join('\n'));
+                return lines;
+            }
             add(true, '域名 ' + location.hostname + ' → 平台 ' + (this.api ? (this.api.platform || '(未知)') : '(未初始化)'));
 
             if (!this.api) {
@@ -1294,9 +1306,18 @@
             if (tasks.length) {
                 const g = k => tasks.filter(t => t.kind === k).length;
                 add(true, '目录读取成功：共 ' + tasks.length + ' 个节点（视频/音频 ' + g('media')
-                    + '、文档 ' + g('document') + '、作业 ' + g('exam') + '、讨论 ' + g('manual') + '、文件夹 ' + g('folder') + '）');
+                    + '、文档 ' + g('document') + '、作业 ' + g('exam') + '、讨论 ' + g('manual') + '、文件夹 ' + g('folder')
+                    + '、未分类 ' + g('unknown') + '）');
                 add(true, '其中已完成 ' + tasks.filter(t => t.done).length + ' 个，可直提 '
                     + tasks.filter(t => t.kind === 'media' || t.kind === 'document').length + ' 个');
+                // 每个节点的最终分类（含未分类），直接看出为什么归零
+                const byKind = tasks.map(t => t.kind + ':' + t.name.slice(0, 12) + '#' + t.queryLevel);
+                add(true, '分类明细（kind:名称#查询层级）：' + byKind.slice(0, 45).join(' | '));
+                console.log('[Ulearn-Helper][icve][diag] 分类明细', tasks.map(t => ({
+                    id: t.id, name: t.name, kind: t.kind, queryLevel: t.queryLevel,
+                    childCount: t.childCount, resourceId: t.resourceId, typeId: t.typeId,
+                    fileUrl: t.fileUrl, examId: t.examId, isTaskPoint: t.raw && t.raw.isTaskPoint,
+                })));
             } else if (!tasks.length) {
                 add(false, '目录为空或读取失败（可能是页面还没加载完，或该课程目录接口结构不同）');
             }
@@ -1329,7 +1350,12 @@
                     for (const s of lv.sample) {
                         add(true, '  · id=' + s.id + ' fileType=' + s.fileType + ' name=' + s.name
                             + (s.hasRecord ? ' [已有记录 ' + s.recordKeys.join('/') + ']' : ' [无记录]')
-                            + (s.fileUrl ? ' fileUrl=' + s.fileUrl : ''));
+                            + ' resourceId=' + (s.resourceId == null ? 'null' : s.resourceId)
+                            + ' typeId=' + (s.typeId == null ? 'null' : s.typeId)
+                            + (s.examId != null ? ' examId=' + s.examId : '')
+                            + (s.isTaskPoint != null ? ' isTaskPoint=' + s.isTaskPoint : '')
+                            + (s.courseDesignCellResourceVos ? ' cells=' + s.courseDesignCellResourceVos : '')
+                            + (s.fileUrl ? ' fileUrl=' + s.fileUrl : ' fileUrl=(空)'));
                     }
                 }
                 for (const t of p.detailTries || []) {
@@ -2118,11 +2144,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.6');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.7');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.6',
+        codeVersion: '4.21.7',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
