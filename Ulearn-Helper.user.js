@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.9
+// @version      4.21.10
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -229,7 +229,7 @@
      * ------------------------------------------------------------------ */
     const state = { token: '', bearer: '', platform: PLATFORM, log: [], tokenFrom: '' };
     // 构建指纹：诊断输出里带上，更新没生效时一眼能看出来
-    state.buildTag = '4.21.9/leaf+level+1';
+    state.buildTag = '4.21.10/leaf+level+1';
     const say = text => { try { env.say(text); } catch (e) { } };
     const trace = (kind, detail) => { state.log.push({ t: Date.now(), kind, detail }); if (state.log.length > 200) state.log.shift(); };
 
@@ -1485,7 +1485,9 @@
             key: id && !courseChanged ? 'zyk|' + id : '', name: clean(catalogInfo.courseName || storeInfo.courseName || storeInfo.courseInfoName),
             archived: Number(storeInfo.archive ?? catalogInfo.archive) === 1 };
     }
-    function resourceFolder(item) {
+    function resourceFolder(item, dir) {
+        if (item.children === true || (Array.isArray(item.children) && item.children.length)) return true;
+        if (typeOf(item, dir) !== 'unknown') return false;
         return String(item.parentId) === '0' || /^(?:父节点|子节点|章节|文件夹|folder|chapter|目录|节点)$/.test(clean(item.fileType));
     }
     function identity(dir) {
@@ -1558,6 +1560,10 @@
     }
     function currentResource() {
         if (resource) return resource.route.id;
+        if (/\/learnspace\/learn\//i.test(win.location.href)) {
+            const selected = queryAll('.s_point.s_pointerct[itemtype]')[0];
+            if (selected) return clean(selected.id || selected.getAttribute('itemid'));
+        }
         const content = findVM('.contentBox, .guide, .teach', vm => vm.nrdata || vm.cellData || vm.currentCell);
         const item = content && (content.nrdata || content.cellData || content.currentCell);
         const active = queryAll('.panelList .node.active, .s_point.s_pointerct')[0];
@@ -1629,7 +1635,7 @@
                     const native = namedLegacyNodes.get(expected);
                     if (native) nativeNodes.set(id, native);
                 }
-                const leaf = resource ? !resourceFolder(item) : Number(item.nrlx) > 0 || !!item.fileType && !/^(?:folder|chapter|目录|章节|节点|父节点|子节点)$/i.test(item.fileType);
+                const leaf = resource ? !resourceFolder(item, dir) : Number(item.nrlx) > 0 || !!item.fileType && !/^(?:folder|chapter|目录|章节|节点|父节点|子节点)$/i.test(item.fileType);
                 const blocked = parentBlocked || !!resource && (item.isLook === false || item.isLook === 0 || item.isLook === '0' ||
                     !!item.endTime && Number.isFinite(Date.parse(item.endTime)) && now > Date.parse(item.endTime));
                 if (!leaf) {
@@ -2089,11 +2095,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.9');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.10');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.9',
+        codeVersion: '4.21.10',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
@@ -5877,24 +5883,16 @@
             this.$rateText = jquery('<span class="ul-study-rate">倍速 <input id="rate" type="text" value="6.00">x</span>');
             this.$rateText.find('input').val(savedRate);
             let $row = jquery('<div class="ul-study-row" id="ul_study_row"></div>');
-            // 智慧职教：这里只保留一条路径。
-            // 协议直提能直接改服务器记录，播放器路径（开始刷课）会和它抢同一批任务、互相覆盖进度，
-            // 所以职教页面不给「开始刷课」，只给「一键直提 + 诊断」；优学院仍用原来的开始刷课。
-            const _icveMode = typeof IS_ICVE !== 'undefined' && IS_ICVE && typeof IcveDirect !== 'undefined';
-            if (_icveMode) {
-                const $oneKey = jquery('<button type="button" class="ul-btn ul-btn-primary" id="ul_icve_onekey">一键直提</button>');
-                const $diag = jquery('<button type="button" class="ul-btn" id="ul_icve_diag">诊断</button>');
-                $oneKey.on('click', () => { IcveDirect.run(); });
-                $diag.on('click', () => { IcveDirect.diagnose(); });
-                $row.append($oneKey).append($diag);
-            } else {
-                $row.append(this.$startBtn).append(this.$stopBtn).append(this.$rateText);
+            const icveMode = typeof IS_ICVE !== 'undefined' && IS_ICVE;
+            if (!icveMode) {
+                $row.append(this.$startBtn).append(this.$stopBtn);
             }
-            const dashboardBtn=jquery('<button type="button" class="ul-btn" id="ul_study_dashboard">学习面板</button>');
-            dashboardBtn.on('click',()=>{if(typeof StudyDashboard!=='undefined')StudyDashboard.open(true);});
+            $row.append(this.$rateText);
+            const dashboardBtn = jquery('<button type="button" class="ul-btn" id="ul_study_dashboard">学习面板</button>');
+            if (icveMode) dashboardBtn.addClass('ul-btn-primary').text('打开课程目录');
+            dashboardBtn.on('click', () => { if (typeof StudyDashboard !== 'undefined') StudyDashboard.open(true); });
             $row.append(dashboardBtn);
-            if (!_icveMode) $row.append(jquery('<span class="ul-study-state" id="ul_study_state">未开始</span>'));
-            $row.append(jquery('<span class="ul-icve-state" id="ul_icve_state">' + (_icveMode ? '未开始' : '') + '</span>'));
+            $row.append(jquery('<span class="ul-study-state" id="ul_study_state">未开始</span>'));
             try {
                 let $tools = jquery('.ul-panel .ul-tools');
                 if ($tools.length) $tools.after($row);
@@ -10355,34 +10353,20 @@ function AntiCheatProbe() {
                 hint: "默认 2；请求仍按间隔启动，遇到限流可降为 1"
             }, ConfigStore.get());
             wrap.appendChild(concurrencyF.el);
-            // 智慧职教：协议层直提（不经过页面控件）；放在最后，保持原有表单项顺序不变
-            const icveBox = UI.el('section', { class: 'ul-icve-box' });
-            icveBox.appendChild(UI.el('h3', { text: '智慧职教协议直提' }));
-            icveBox.appendChild(UI.el('div', { class: 'ul-f-h', text: '直接调用平台的 studyRecord 接口，逐任务回读校验；与页面控件路径互不影响。' }));
-            icveBox.appendChild(mk("sources.icveDirect", "启用协议直提", "课堂/资源库/职教云/AI优课通用"));
-            icveBox.appendChild(mk("sources.icveAnswer", "启用协议答题", "答案仍按来源顺序取，交卷走平台 exam/record"));
-            const tokenField = UI.field({
-                path: "sources.icveToken", type: "secret", label: "ICVE Token（可留空）",
-                hint: "留空则自动从当前页面的登录态兑换 access_token；多开或页面取不到时再手填"
-            }, ConfigStore.get());
-            icveBox.appendChild(tokenField.el);
-            const delayField = UI.field({
-                path: "sources.icveDelay", type: "number", label: "任务间隔（毫秒）", min: 0, max: 10000,
-                hint: "默认 800，逐任务提交之间的等待"
-            }, ConfigStore.get());
-            icveBox.appendChild(delayField.el);
-            const row = UI.el('div', { class: 'ul-icve-row' });
-            const scanBtn = UI.el('button', { type: 'button', class: 'ul-sbtn', text: '只读扫描目录' });
-            UI.cap(scanBtn, 'click', function () { scanBtn.disabled = true; IcveDirect.scan().finally(() => { scanBtn.disabled = false; }); });
-            const runBtn = UI.el('button', { type: 'button', class: 'ul-btn ul-btn-primary', text: '开始直提' });
-            UI.cap(runBtn, 'click', function () { IcveDirect.run(); });
-            const stopBtn = UI.el('button', { type: 'button', class: 'ul-sbtn', text: '停止', hidden: true });
-            UI.cap(stopBtn, 'click', function () { IcveDirect.stop(); });
-            row.appendChild(scanBtn); row.appendChild(runBtn); row.appendChild(stopBtn);
-            icveBox.appendChild(row);
-            icveBox.appendChild(UI.el('progress', { id: 'ul_icve_bar', max: 1, value: 0, hidden: true }));
-            icveBox.appendChild(UI.el('div', { class: 'ul-icve-state', id: 'ul_icve_state', text: '未开始' }));
-            wrap.appendChild(icveBox);
+            if (IS_ICVE) {
+                const icveBox = UI.el('section', { class: 'ul-icve-box' });
+                icveBox.appendChild(UI.el('h3', { text: '智慧职教目录诊断' }));
+                const diagnoseBtn = UI.el('button', { type: 'button', class: 'ul-sbtn', text: '诊断目录与进度' });
+                UI.cap(diagnoseBtn, 'click', async function () {
+                    diagnoseBtn.disabled = true;
+                    try { await IcveDirect.diagnose(); }
+                    catch (error) { IcveDirect.say('诊断失败，请刷新课程页面后重试'); }
+                    finally { diagnoseBtn.disabled = false; }
+                });
+                icveBox.appendChild(diagnoseBtn);
+                icveBox.appendChild(UI.el('div', { class: 'ul-icve-state', id: 'ul_icve_state', text: '未开始' }));
+                wrap.appendChild(icveBox);
+            }
             return { el: wrap, fields: [] };
         },
         // 分页：AI 接口
