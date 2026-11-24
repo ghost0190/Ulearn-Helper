@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.7
+// @version      4.21.8
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -229,7 +229,7 @@
      * ------------------------------------------------------------------ */
     const state = { token: '', bearer: '', platform: PLATFORM, log: [], tokenFrom: '' };
     // 构建指纹：诊断输出里带上，更新没生效时一眼能看出来
-    state.buildTag = '4.21.7/leaf+level+1';
+    state.buildTag = '4.21.8/leaf+level+1';
     const say = text => { try { env.say(text); } catch (e) { } };
     const trace = (kind, detail) => { state.log.push({ t: Date.now(), kind, detail }); if (state.log.length > 200) state.log.shift(); };
 
@@ -301,12 +301,13 @@
     }
     async function call(url, options) {
         const opt = Object.assign({ credentials: 'include', headers: authHeaders() }, options || {});
-        trace('request', { url, method: opt.method || 'GET' });
+        const path = String(url).split(/[?#]/, 1)[0];
+        trace('request', { path, method: opt.method || 'GET' });
         const res = await fetchFn(url, opt);
         const text = await res.text();
         let json = null;
         try { json = text ? JSON.parse(text) : null; } catch (e) { }
-        trace('response', { url, status: res.status, code: json && json.code, msg: json && json.msg });
+        trace('response', { path, status: res.status, code: Number(json?.code) || null });
         return { status: res.status, ok: res.ok, text, json };
     }
     /**
@@ -1258,14 +1259,8 @@
             const add = (ok, text) => { lines.push((ok ? '✓ ' : '✗ ') + text); console.log('[Ulearn-Helper][icve][diag] ' + (ok ? 'OK ' : 'FAIL ') + text); };
             // 版本与构建指纹：更新没生效时一眼能看出来，不用靠输出格式猜
             const ver = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?';
-            const fp = (this.api && this.api.buildTag) || '(旧版无指纹)';
-            add(fp !== '(旧版无指纹)', '脚本版本 v' + ver + ' ｜ 协议层构建 ' + fp);
-            if (fp === '(旧版无指纹)') {
-                add(false, '协议层是旧版：Tampermonkey 里脚本未更新到 4.21.7，'
-                    + '请在管理面板点「检查更新」，或重新安装一次 raw 链接');
-                this.say(lines.join('\n'));
-                return lines;
-            }
+            const fp = this.api?.state?.buildTag;
+            add(true, '脚本版本 v' + ver + ' ｜ 协议层构建 ' + (fp || '未标记'));
             add(true, '域名 ' + location.hostname + ' → 平台 ' + (this.api ? (this.api.platform || '(未知)') : '(未初始化)'));
 
             if (!this.api) {
@@ -1310,66 +1305,11 @@
                     + '、未分类 ' + g('unknown') + '）');
                 add(true, '其中已完成 ' + tasks.filter(t => t.done).length + ' 个，可直提 '
                     + tasks.filter(t => t.kind === 'media' || t.kind === 'document').length + ' 个');
-                // 每个节点的最终分类（含未分类），直接看出为什么归零
-                const byKind = tasks.map(t => t.kind + ':' + t.name.slice(0, 12) + '#' + t.queryLevel);
-                add(true, '分类明细（kind:名称#查询层级）：' + byKind.slice(0, 45).join(' | '));
-                console.log('[Ulearn-Helper][icve][diag] 分类明细', tasks.map(t => ({
-                    id: t.id, name: t.name, kind: t.kind, queryLevel: t.queryLevel,
-                    childCount: t.childCount, resourceId: t.resourceId, typeId: t.typeId,
-                    fileUrl: t.fileUrl, examId: t.examId, isTaskPoint: t.raw && t.raw.isTaskPoint,
-                })));
             } else if (!tasks.length) {
                 add(false, '目录为空或读取失败（可能是页面还没加载完，或该课程目录接口结构不同）');
             }
 
-            // ⑤ 拿一个真实任务做端到端探针：这是「拿不到 studyRecord.id / 提交失败」的唯一可靠判据
-            const probe = tasks.find(t => t.kind === 'media' || t.kind === 'document');
-            if (probe && this.api.platform === 'zyk') {
-                try {
-                    const d = await this.api.adapters.zyk.detail(probe.id);
-                    add(d.ok, '资源详情接口 code=' + d.code + (d.msg ? '（' + d.msg + '）' : '')
-                        + '，返回字段：' + (d.keys.length ? d.keys.join(',') : '空'));
-                    if (!d.ok) add(false, '详情接口失败 → courseInfoId 与资源不属于同一门课，请确认在课程目录页点按钮');
-                    else if (!d.record) add(true, '该资源尚无 studentStudyRecord（首次学习属正常，提交时 id 传 null 由服务端创建）');
-                    else add(true, '已存在 studentStudyRecord，id=' + d.record.id);
-                } catch (e) { add(false, '详情接口异常：' + (e && e.message || e)); }
-            } else if (probe && this.api.platform === 'zjy2') {
-                try {
-                    const info = await this.api.adapters.zjy2.info(probe.id);
-                    add(!!info, info ? '资源详情可读，studentStudyRecord=' + (info.studentStudyRecord ? '有' : '无（首次学习）') : '资源详情为空');
-                } catch (e) { add(false, '资源详情异常：' + (e && e.message || e)); }
-            }
-
-            // ⑤ 原始探测：不依赖分类，直接看平台返回的真实字段，并试出详情接口认哪个 id
-            try {
-                this.say('正在做原始探测（会尝试多种候选 id）…');
-                const p = await this.api.probe(ctx);
-                for (const lv of p.levels || []) {
-                    add(lv.count > 0, '目录层 parentId=' + lv.parentId + ' level=' + lv.level + ' 共 ' + lv.count + ' 项'
-                        + (lv.fields.length ? '，字段：' + lv.fields.join(',') : ''));
-                    for (const s of lv.sample) {
-                        add(true, '  · id=' + s.id + ' fileType=' + s.fileType + ' name=' + s.name
-                            + (s.hasRecord ? ' [已有记录 ' + s.recordKeys.join('/') + ']' : ' [无记录]')
-                            + ' resourceId=' + (s.resourceId == null ? 'null' : s.resourceId)
-                            + ' typeId=' + (s.typeId == null ? 'null' : s.typeId)
-                            + (s.examId != null ? ' examId=' + s.examId : '')
-                            + (s.isTaskPoint != null ? ' isTaskPoint=' + s.isTaskPoint : '')
-                            + (s.courseDesignCellResourceVos ? ' cells=' + s.courseDesignCellResourceVos : '')
-                            + (s.fileUrl ? ' fileUrl=' + s.fileUrl : ' fileUrl=(空)'));
-                    }
-                }
-                for (const t of p.detailTries || []) {
-                    add(t.ok, '详情接口 id=' + t.id + ' → code=' + t.code + (t.msg ? '（' + t.msg + '）' : '')
-                        + (t.keys.length ? '，字段：' + t.keys.join(',') : ''));
-                }
-                if (!(p.detailTries || []).some(t => t.ok) && (p.detailTries || []).length) {
-                    add(false, '所有候选 id 都被详情接口拒绝 → 提交会失败');
-                }
-                console.log('[Ulearn-Helper][icve][diag] 原始探测', JSON.stringify(p, null, 1));
-            } catch (e) { add(false, '原始探测异常：' + (e && e.message || e)); }
-
             this.say(lines.join('\n'));
-            console.log('[Ulearn-Helper][icve][diag] 请求轨迹', this.api.state.log);
             return lines;
         },
 
@@ -2144,11 +2084,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.7');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.8');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.7',
+        codeVersion: '4.21.8',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
