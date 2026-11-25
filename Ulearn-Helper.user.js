@@ -3,7 +3,7 @@
 // @name:zh-CN   Ulearn-Helper
 // @name:en      Ulearn-Helper
 // @namespace    http://tampermonkey.net/
-// @version      4.21.10
+// @version      4.21.11
 // @description  Ulearn-Helper：支持优学院与智慧职教的学习进度、课件连续播放、目录导航及 AI 练习辅助。
 // @homepageURL  https://github.com/ghost0190/Ulearn-Helper
 // @supportURL   https://github.com/ghost0190/Ulearn-Helper/issues
@@ -229,7 +229,7 @@
      * ------------------------------------------------------------------ */
     const state = { token: '', bearer: '', platform: PLATFORM, log: [], tokenFrom: '' };
     // 构建指纹：诊断输出里带上，更新没生效时一眼能看出来
-    state.buildTag = '4.21.10/leaf+level+1';
+    state.buildTag = '4.21.11/leaf+level+1';
     const say = text => { try { env.say(text); } catch (e) { } };
     const trace = (kind, detail) => { state.log.push({ t: Date.now(), kind, detail }); if (state.log.length > 200) state.log.shift(); };
 
@@ -1529,9 +1529,14 @@
     function completion(item, dir) {
         if (resource) {
             const detail = resource.viewer?.designData;
-            const record = item.studentStudyRecord || (String(detail?.id || '') === String(item.id) ? detail.studentStudyRecord : null);
-            // The resource library renders the same speed field in its course directory.
-            return { known: !!(dir || record) && !resource.archived, complete: Number(record?.speed) >= 100 };
+            const currentDetail = String(detail?.id || '') === String(item.id) ? detail : null;
+            const catalogSpeed = item.studentStudyRecord?.speed;
+            const detailSpeed = currentDetail?.studentStudyRecord?.speed;
+            const validSpeed = speed => speed != null && String(speed).trim() !== '' && Number.isFinite(Number(speed));
+            const speed = validSpeed(catalogSpeed) ? catalogSpeed : detailSpeed;
+            const hasSpeed = validSpeed(speed);
+            const known = hasSpeed || item.studentStudyRecord === null || currentDetail?.studentStudyRecord === null;
+            return { known: known && !resource.archived, complete: hasSpeed && !resource.archived && Number(speed) >= 100 };
         }
         if (completedIds) return { known: true, complete: completedIds.has(String(item.id)) };
         const el = nodeFor(item.id);
@@ -2095,11 +2100,11 @@
         return true;
     }
     if (!claimRuntime()) {
-        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.10');
+        console.info('[Ulearn-Helper][trace] duplicate_runtime_skipped code=4.21.11');
         return;
     }
     const RuntimeTrace = {
-        codeVersion: '4.21.10',
+        codeVersion: '4.21.11',
         instance: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
         events: [], limit: 200,
         record(event, data) {
